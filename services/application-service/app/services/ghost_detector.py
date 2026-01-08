@@ -1,33 +1,37 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import select, update
-from app.db.models import Application
-from app.config import settings
+from sqlalchemy import select, update, and_
+from app.models import Application
 from datetime import datetime, timedelta
 
 class GhostDetector:
     def __init__(self, db: Session):
         self.db = db
+        # 14-21 days as requested, picking 14 for strictness or make it configurable
+        self.inactive_threshold_days = 14
 
-    def detect_and_mark_ghosted(self) -> int:
+    def run(self) -> int:
         """
-        Scans for applications with no activity for N days and marks them as ghosted.
-        Returns the number of applications updated.
+        Marks applications as 'Ghosted' if:
+        - No update for X days
+        - Status is NOT 'Rejected', 'Offer', 'Hired'
+        - Currently NOT 'Ghosted'
         """
-        threshold_date = datetime.utcnow() - timedelta(days=settings.GHOSTED_DAYS_THRESHOLD)
+        cutoff_date = datetime.utcnow() - timedelta(days=self.inactive_threshold_days)
         
-        # Query: Active apps (not Rejected, not Offered, not already ghosted)
-        # whose last activity was before threshold
-        
+        # Find candidates
         stmt = (
             update(Application)
             .where(
-                Application.last_email_date < threshold_date,
-                Application.ghosted == False,
-                Application.status.notin_(["Rejected", "Offer", "Ghosted"])
+                and_(
+                    Application.last_email_date < cutoff_date,
+                    Application.ghosted == False,
+                    Application.status.notin_(["Rejected", "Offer", "Hired", "Ghosted"])
+                )
             )
-            .values(ghosted=True, updated_at=datetime.utcnow())
+            .values(ghosted=True)
         )
         
         result = self.db.execute(stmt)
         self.db.commit()
+        
         return result.rowcount

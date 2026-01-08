@@ -12,10 +12,10 @@ class ExcelGenerator:
                 "Company": app.company.name.title(),
                 "Role": app.role.title,
                 "Status": app.status,
-                "Applied Count": app.applied_count,
+                "Application Count": app.applied_count,
+                "Resume Used": app.resume.file_name if app.resume else "N/A",
                 "Last Updated": app.last_email_date.replace(tzinfo=None) if app.last_email_date else None,
-                "Ghosted": "Yes" if app.ghosted else "No",
-                "Resume": app.resume.file_name if app.resume else "N/A"
+                "Ghosted": "Yes" if app.ghosted else "No"
             })
             
         df = pd.read_json(pd.Series(data).to_json(orient='records')) if data else pd.DataFrame()

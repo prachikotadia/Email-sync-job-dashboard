@@ -34,10 +34,22 @@ def get_applications(
 @router.patch("/{id}", response_model=ApplicationResponse)
 def update_application(id: uuid.UUID, update: ApplicationUpdate, db: Session = Depends(get_db)):
     repo = ApplicationRepository(db)
-    # Logic to update
+    # Logic to update status
     if update.status:
         repo.update_application_status(str(id), update.status)
-        
+    
+    # Logic to update resume
+    if update.resume_id:
+        from app.services.resume_matcher import ResumeMatcher
+        matcher = ResumeMatcher(db)
+        matcher.link_resume_to_application(str(id), str(update.resume_id))
+
+    # Logic to manual override ghosted
+    if update.ghosted is not None:
+        app = repo.get_by_id(str(id))
+        app.ghosted = update.ghosted
+        db.commit()
+
     app = repo.get_by_id(str(id))
     if not app:
         raise HTTPException(status_code=404, detail="Not found")
