@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light Theme Base Colors */
+    --bg-app: #EEF2F7;
+    --bg-surface: #F1F5F9;
+    --text-primary: #1e293b;
+    /* slate-800 */
+    --text-secondary: #64748b;
+    /* slate-500 */
+    --text-muted: #94a3b8;
+    /* slate-400 */
+
+    /* Light Theme Shadows */
+    --shadow-neo: 8px 8px 16px rgba(163, 177, 198, 0.6), -8px -8px 16px rgba(255, 255, 255, 0.9);
+    --shadow-neo-pressed: inset 6px 6px 12px rgba(163, 177, 198, 0.55), inset -6px -6px 12px rgba(255, 255, 255, 0.9);
+    --shadow-neo-input: inset 4px 4px 10px rgba(163, 177, 198, 0.55), inset -4px -4px 10px rgba(255, 255, 255, 0.9);
+    --shadow-neo-button: 6px 6px 14px rgba(99, 102, 241, 0.35), -6px -6px 14px rgba(255, 255, 255, 0.65);
+    --shadow-neo-button-active: inset 6px 6px 12px rgba(0, 0, 0, 0.18);
+  }
+
+  .dark {
+    /* Dark Theme Base Colors */
+    --bg-app: #0f172a;
+    /* slate-900 */
+    --bg-surface: #1e293b;
+    /* slate-800 */
+    --text-primary: #f8fafc;
+    /* slate-50 */
+    --text-secondary: #cbd5e1;
+    /* slate-300 */
+    --text-muted: #64748b;
+    /* slate-500 */
+
+    /* Dark Theme Shadows - Subtle and clean */
+    --shadow-neo: 8px 8px 18px rgba(0, 0, 0, 0.55), -8px -8px 18px rgba(255, 255, 255, 0.06);
+    --shadow-neo-pressed: inset 6px 6px 14px rgba(0, 0, 0, 0.55), inset -6px -6px 14px rgba(255, 255, 255, 0.06);
+    --shadow-neo-input: inset 4px 4px 10px rgba(0, 0, 0, 0.55), inset -4px -4px 10px rgba(255, 255, 255, 0.06);
+    --shadow-neo-button: 6px 6px 14px rgba(99, 102, 241, 0.4), -6px -6px 14px rgba(255, 255, 255, 0.05);
+    --shadow-neo-button-active: inset 4px 4px 12px rgba(0, 0, 0, 0.6);
+  }
+
+  body {
+    @apply bg-app text-text-primary antialiased transition-colors duration-200;
+  }
+}

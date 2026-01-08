@@ -1,0 +1,59 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Processed Email",
+    "description": "Schema for the payload sent from Email AI Service to Application Service",
+    "type": "object",
+    "properties": {
+        "email_id": {
+            "type": "string",
+            "description": "Unique identifier for the email (from Gmail)"
+        },
+        "subject": {
+            "type": "string",
+            "description": "Subject line of the email"
+        },
+        "sender": {
+            "type": "string",
+            "description": "Sender email address"
+        },
+        "received_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 timestamp of when the email was received"
+        },
+        "company_name": {
+            "type": "string",
+            "description": "Extracted company name"
+        },
+        "application_status": {
+            "type": "string",
+            "enum": [
+                "Applied",
+                "Interview",
+                "Offer",
+                "Rejected",
+                "Ghosted",
+                "Unknown"
+            ],
+            "description": " AI-determined status of the application"
+        },
+        "summary": {
+            "type": "string",
+            "description": "Brief summary of the email content"
+        },
+        "confidence_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence score of the extraction"
+        }
+    },
+    "required": [
+        "email_id",
+        "subject",
+        "sender",
+        "received_at",
+        "company_name",
+        "application_status"
+    ]
+}
