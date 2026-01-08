@@ -1,6 +1,13 @@
 -- Enable UUID extension
 create extension if not exists "uuid-ossp";
 
+-- Users Table
+create table if not exists users (
+    id uuid primary key default uuid_generate_v4(),
+    email text unique not null,
+    created_at timestamp with time zone default now()
+);
+
 -- Companies Table
 create table if not exists companies (
     id uuid primary key default uuid_generate_v4(),
@@ -20,6 +27,7 @@ create table if not exists roles (
 -- Resumes Table
 create table if not exists resumes (
     id uuid primary key default uuid_generate_v4(),
+    user_id uuid references users(id), -- Optional owner
     file_name text not null,
     storage_url text not null,
     tags text[] default array[]::text[],
@@ -29,6 +37,7 @@ create table if not exists resumes (
 -- Applications Table
 create table if not exists applications (
     id uuid primary key default uuid_generate_v4(),
+    user_id uuid references users(id), -- Optional owner
     company_id uuid references companies(id) on delete cascade not null,
     role_id uuid references roles(id) on delete cascade not null,
     status text not null default 'Applied',
@@ -42,17 +51,23 @@ create table if not exists applications (
     unique(company_id, role_id)
 );
 
--- Application Events Audit Log
-create table if not exists application_events (
+-- Status History Table (Append-only)
+create table if not exists status_history (
     id uuid primary key default uuid_generate_v4(),
     application_id uuid references applications(id) on delete cascade not null,
-    event_type text not null,
-    raw_payload jsonb,
-    created_at timestamp with time zone default now()
+    status text not null,
+    previous_status text,
+    changed_at timestamp with time zone default now()
 );
 
--- Indexes for performance
+-- Application Resumes (Many-to-Many if needed, usually direct link is enough but requested)
+create table if not exists application_resumes (
+    application_id uuid references applications(id) on delete cascade,
+    resume_id uuid references resumes(id) on delete cascade,
+    primary key (application_id, resume_id)
+);
+
+-- Indexes
 create index if not exists idx_companies_name on companies(name);
-create index if not exists idx_applications_ghosted on applications(ghosted);
+create index if not exists idx_applications_user on applications(user_id);
 create index if not exists idx_applications_status on applications(status);
-create index if not exists idx_applications_last_email on applications(last_email_date);

@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from app.db.repository import ApplicationRepository
+from app.db.repositories import ApplicationRepository
 from app.services.excel_generator import ExcelGenerator
-from app.utils.db_session import get_db
+from app.db.supabase import get_db
 from datetime import datetime
 
 router = APIRouter()
@@ -11,7 +11,8 @@ router = APIRouter()
 @router.get("/excel")
 def export_excel(db: Session = Depends(get_db)):
     repo = ApplicationRepository(db)
-    apps = repo.get_applications(limit=10000) # Reasonable export limit
+    apps = repo.list_applications(limit=10000)
+    # ...
     
     excel_file = ExcelGenerator.generate(apps)
     

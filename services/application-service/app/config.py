@@ -3,16 +3,12 @@ from typing import Optional
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Application Service"
-    API_V1_STR: str = "/api/v1"
     
     # Supabase / DB
-    SUPABASE_URL: str
-    SUPABASE_KEY: str
-    DATABASE_URL: Optional[str] = None # Optional for SQLAlchemy direct connection
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_KEY: Optional[str] = None
+    DATABASE_URL: str = "sqlite:///./app.db" # Default to sqlite for local dev if no env
 
-    # Service Configuration
-    GHOSTED_DAYS_THRESHOLD: int = 14
-    
     class Config:
         env_file = ".env"
         case_sensitive = True
