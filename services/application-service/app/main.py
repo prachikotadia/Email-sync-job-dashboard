@@ -1,15 +1,15 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import List
-import os
-import pandas as pd
-from datetime import datetime
+from app.api import health, ingest, applications, export, resumes
+from app.config import settings
 
-app = FastAPI(title="Application Service")
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    description="The source of truth for job applications."
+)
 
-# CORS Setup
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,39 +18,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "service": "application-service"}
+# Include Routers
+app.include_router(health.router, tags=["Health"])
+app.include_router(ingest.router, prefix="/ingest", tags=["Ingest"])
+app.include_router(applications.router, prefix="/applications", tags=["Applications"])
+app.include_router(export.router, prefix="/export", tags=["Export"])
+app.include_router(resumes.router, prefix="/resumes", tags=["Resumes"])
 
-@app.get("/applications")
-def get_applications():
-    # Mock data
-    return [
-        {
-            "id": 1,
-            "company": "Google",
-            "position": "Frontend Engineer",
-            "status": "Interview",
-            "date": "2023-10-15"
-        },
-        {
-            "id": 2,
-            "company": "Netflix",
-            "position": "Senior Engineer",
-            "status": "Applied",
-            "date": "2023-10-18"
-        }
-    ]
-
-@app.get("/export/excel")
-def export_excel():
-    # Create dummy dataframe
-    df = pd.DataFrame([
-        {"Company": "Google", "Status": "Interview", "Date": "2023-10-15"},
-        {"Company": "Netflix", "Status": "Applied", "Date": "2023-10-18"}
-    ])
-    
-    filename = "applications_export.xlsx"
-    df.to_excel(filename, index=False)
-    
-    return FileResponse(path=filename, filename=filename, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002)
