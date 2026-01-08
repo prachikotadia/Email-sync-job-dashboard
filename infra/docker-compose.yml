@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - api-gateway
+
+  api-gateway:
+    build:
+      context: ../services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - auth-service
+      - gmail-connector-service
+      - email-intelligence-service
+      - application-service
+      - notification-service
+
+  auth-service:
+    build:
+      context: ../services/auth-service
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+
+  gmail-connector-service:
+    build:
+      context: ../services/gmail-connector-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+
+  email-intelligence-service:
+    build:
+      context: ../services/email-intelligence-service
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+
+  application-service:
+    build:
+      context: ../services/application-service
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+
+  notification-service:
+    build:
+      context: ../services/notification-service
+      dockerfile: Dockerfile
+    ports:
+      - "8005:8005"
