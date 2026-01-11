@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     JWT_AUDIENCE: str = "email-sync-job-dashboard-users"
     
     # Service URLs
-    APPLICATION_SERVICE_URL: str = "http://application-service:8002"
-    AUTH_SERVICE_URL: str = "http://auth-service:8003"
+    APPLICATION_SERVICE_URL: str = "http://localhost:8002"
+    AUTH_SERVICE_URL: str = "http://localhost:8003"
     GMAIL_SERVICE_URL: str = "http://localhost:8001"
     
     # CORS
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # This can point to either the gateway (http://localhost:8000/auth/gmail/callback)
     # or directly to gmail-connector-service (http://localhost:8001/auth/gmail/callback)
     # Must match EXACTLY what's registered in Google Cloud Console
-    GOOGLE_REDIRECT_URI: str = "http://localhost:8001/auth/gmail/callback"
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/auth/gmail/callback"
     
     # Environment
     ENV: str = "dev"  # dev, staging, production

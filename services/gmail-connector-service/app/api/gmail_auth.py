@@ -16,10 +16,12 @@ from app.security.oauth import (
     exchange_code_for_tokens,
     get_gmail_profile
 )
+from app.security.token_verification import verify_token_scopes
 from app.config import get_settings
 import httpx
 import json
 import logging
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,10 +76,19 @@ async def store_gmail_tokens(user_id: str, tokens: dict, gmail_email: str, acces
                 timeout=10.0
             )
             if response.status_code != 201:
-                logger.error(f"Failed to store tokens for user {user_id}: {response.status_code} - {response.text}")
+                error_text = response.text
+                logger.error(f"Failed to store tokens for user {user_id}: {response.status_code} - {error_text}")
+                
+                # Try to extract detailed error message from response
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", error_text)
+                except:
+                    error_detail = error_text
+                
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to store Gmail tokens"
+                    detail=f"Failed to store Gmail tokens: {error_detail}"
                 )
             result = response.json()
             logger.info(f"Gmail tokens stored successfully for user {user_id}, connection_id: {result.get('connection_id')}")
@@ -248,16 +259,130 @@ async def gmail_oauth_callback(
         
         # Exchange code for tokens using the SAME redirect_uri from gateway
         # This MUST match exactly what was used in the authorization URL
+        logger.info(f"=== CALLBACK PROCESSING DEBUG ===")
+        logger.info(f"Redirect URI received: '{redirect_uri}'")
+        logger.info(f"Redirect URI length: {len(redirect_uri)}")
+        logger.info(f"Redirect URI from settings: '{settings.GOOGLE_REDIRECT_URI}'")
+        logger.info(f"Redirect URIs match: {redirect_uri == settings.GOOGLE_REDIRECT_URI}")
+        logger.info(f"Code present: {code is not None}")
+        logger.info(f"State present: {state is not None}")
+        logger.info(f"User ID: {user_id}")
+        logger.info(f"================================")
+        
         logger.info(f"Exchanging authorization code for tokens with redirect_uri: {redirect_uri}")
         flow = get_oauth_flow(redirect_uri)
         tokens = exchange_code_for_tokens(flow, code, redirect_uri)
+        
+        # CRITICAL: Verify scopes using Google's tokeninfo endpoint (runtime verification)
+        # This ensures the actual access token has gmail.readonly scope
+        access_token = tokens.get("token")
+        if not access_token:
+            logger.error("No access token in token exchange result")
+            frontend_url = "http://localhost:5173"
+            return RedirectResponse(
+                url=f"{frontend_url}/settings?gmail_error=no_access_token&message=Failed to obtain access token. Please try again.",
+                status_code=302
+            )
+        
+        logger.info(f"=== RUNTIME SCOPE VERIFICATION (tokeninfo) ===")
+        try:
+            tokeninfo_result = await verify_token_scopes(access_token)
+            tokeninfo_scopes = tokeninfo_result.get("scopes", [])
+            has_readonly = tokeninfo_result.get("has_readonly", False)
+            has_metadata = tokeninfo_result.get("has_metadata", False)
+            
+            logger.info(f"Tokeninfo scopes: {tokeninfo_scopes}")
+            logger.info(f"Has gmail.readonly: {has_readonly}")
+            logger.info(f"Has gmail.metadata: {has_metadata}")
+            
+            # CRITICAL: REJECT tokens with metadata scope - we only want readonly scope
+            # Do NOT store tokens with metadata scope (even if readonly is also present)
+            if has_metadata:
+                error_msg = (
+                    "Gmail token has metadata scope. "
+                    "We only store tokens with readonly scope (not metadata). "
+                    "Please disconnect and reconnect your Gmail account. "
+                    f"Current token scopes: {tokeninfo_scopes}"
+                )
+                logger.error(f"❌ {error_msg}")
+                frontend_url = "http://localhost:5173"
+                return RedirectResponse(
+                    url=f"{frontend_url}/settings?gmail_error=metadata_scope_not_allowed&message={urllib.parse.quote(error_msg)}",
+                    status_code=302
+                )
+            
+            # REQUIRED: Only readonly scope supports search queries
+            # Metadata scope does NOT support 'q' parameter and will return 403 error
+            if not has_readonly:
+                logger.error(
+                    f"ERROR: Gmail connection does not have gmail.readonly scope. "
+                    f"Tokeninfo scopes: {tokeninfo_scopes}. "
+                    f"Email sync will fail with 403 error when using search queries (q parameter). "
+                    f"Please disconnect and reconnect with readonly scope."
+                )
+                # Redirect to frontend with error
+                frontend_url = "http://localhost:5173"
+                return RedirectResponse(
+                    url=f"{frontend_url}/settings?gmail_error=missing_readonly_scope&message=Gmail connection needs readonly scope for search queries. Please reconnect.",
+                    status_code=302
+                )
+            
+            # Filter out metadata scope from stored scopes
+            # Store ONLY the scopes we want (readonly, not metadata)
+            original_scopes = tokens.get("scopes", [])
+            filtered_scopes = [
+                scope for scope in original_scopes
+                if 'gmail.metadata' not in scope
+            ]
+            
+            if has_metadata:
+                logger.warning(
+                    f"WARNING: Tokeninfo shows metadata scope present. "
+                    f"Filtering it out before storing. "
+                    f"Original: {original_scopes}, Filtered: {filtered_scopes}"
+                )
+                # Update tokens dict with filtered scopes
+                tokens["scopes"] = filtered_scopes
+            
+            # Don't store tokeninfo_scopes - it's only for verification
+            # We can always verify scopes later using tokeninfo endpoint
+            # This keeps the stored JSON smaller (max 2000 chars)
+            
+            logger.info("✅ Gmail connection has gmail.readonly scope - email search queries will work")
+            logger.info(f"Storing tokens with scopes: {filtered_scopes}")
+            
+            # Log token size for debugging
+            tokens_json_size = len(json.dumps(tokens))
+            logger.info(f"Tokens JSON size: {tokens_json_size} chars (max 2000)")
+            if tokens_json_size > 2000:
+                logger.warning(f"⚠️ WARNING: Tokens JSON size ({tokens_json_size}) exceeds max (2000). Storage may fail.")
+            
+        except Exception as e:
+            logger.error(f"Error verifying token scopes: {e}", exc_info=True)
+            frontend_url = "http://localhost:5173"
+            return RedirectResponse(
+                url=f"{frontend_url}/settings?gmail_error=token_verification_failed&message=Failed to verify token scopes. Please try again.",
+                status_code=302
+            )
+        
+        logger.info(f"========================================")
         
         # Get Gmail profile to get email
         profile = get_gmail_profile(tokens)
         gmail_email = profile.get("email")
         
-        # Store tokens via auth-service API
-        await store_gmail_tokens(user_id, tokens, gmail_email, access_token)
+        # Store tokens via auth-service API (with filtered scopes - no metadata)
+        try:
+            await store_gmail_tokens(user_id, tokens, gmail_email, access_token)
+        except HTTPException as storage_error:
+            # If token storage fails, redirect with detailed error
+            logger.error(f"Token storage failed for user {user_id}: {storage_error.detail}")
+            frontend_url = "http://localhost:5173"
+            error_detail = storage_error.detail or "Failed to store Gmail tokens"
+            return RedirectResponse(
+                url=f"{frontend_url}/settings?gmail_error=storage_failed&message={urllib.parse.quote(error_detail)}",
+                status_code=302
+            )
         
         # Redirect to frontend Settings page with success
         frontend_url = "http://localhost:5173"
@@ -296,19 +421,29 @@ async def gmail_oauth_callback(
         )
     except Exception as e:
         # Log the full exception for debugging
-        logger.error(f"Error in Gmail OAuth callback: {type(e).__name__}: {str(e)}", exc_info=True)
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.error(f"=== Unexpected Error in Gmail OAuth Callback ===")
+        logger.error(f"Error Type: {error_type}")
+        logger.error(f"Error Message: {error_msg}")
+        logger.error(f"Redirect URI used: {redirect_uri if 'redirect_uri' in locals() else 'N/A'}")
+        logger.error(f"================================================", exc_info=True)
+        
         frontend_url = "http://localhost:5173"
-        # Try to provide a more specific error based on exception type
-        if "redirect_uri_mismatch" in str(e).lower():
+        error_msg_lower = error_msg.lower()
+        detailed_error = f"{error_type}: {error_msg}"
+        
+        if "redirect_uri_mismatch" in error_msg_lower or "redirecturimismatcherror" in error_msg_lower:
             error_code = "redirect_uri_mismatch"
-        elif "invalid_grant" in str(e).lower():
+        elif "invalid_grant" in error_msg_lower or "invalidgranterror" in error_msg_lower:
             error_code = "invalid_grant"
-        elif "access_denied" in str(e).lower():
+        elif "access_denied" in error_msg_lower:
             error_code = "access_denied"
         else:
             error_code = "callback_failed"
+        
         return RedirectResponse(
-            url=f"{frontend_url}/settings?gmail_error={error_code}",
+            url=f"{frontend_url}/settings?gmail_error={error_code}&error_details={urllib.parse.quote(detailed_error)}",
             status_code=302
         )
 

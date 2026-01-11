@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import health, auth, gmail
+from app.api import health, auth, gmail, google_auth
 from app.config import get_settings
 from app.db.session import init_db
 import logging
@@ -41,6 +41,7 @@ async def startup_event():
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(gmail.router, prefix="/api", tags=["gmail"])
+app.include_router(google_auth.router)  # Google OAuth unified login
 
 
 if __name__ == "__main__":

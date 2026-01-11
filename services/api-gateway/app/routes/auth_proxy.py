@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, Depends
-from fastapi.responses import Response
+from fastapi.responses import Response, RedirectResponse
 from app.clients.auth_client import auth_client
 from app.middleware.auth import require_auth, UserContext
 from app.utils.errors import create_error_response, get_request_id, add_user_headers
@@ -231,6 +231,91 @@ async def me_proxy(
         return create_error_response(
             code="AUTH_SERVICE_ERROR",
             message="Failed to get user info",
+            status_code=500,
+            request_id=request_id
+        )
+
+
+@router.get("/auth/google/login")
+async def google_login_proxy(request: Request):
+    """Proxy Google OAuth login initiation to auth-service (no JWT required)."""
+    try:
+        import httpx
+        from app.config import get_settings
+        
+        settings = get_settings()
+        redirect_uri = request.query_params.get("redirect_uri")
+        
+        # Build query params
+        params = {}
+        if redirect_uri:
+            params["redirect_uri"] = redirect_uri
+        
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            response = await client.get(
+                f"{settings.AUTH_SERVICE_URL}/auth/google/login",
+                params=params
+            )
+            
+            # If it's a redirect, return redirect response
+            if response.status_code in [302, 301, 307, 308]:
+                redirect_url = response.headers.get("location")
+                if redirect_url:
+                    return RedirectResponse(url=redirect_url, status_code=response.status_code)
+            
+            # Otherwise return the response
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                media_type=response.headers.get("content-type", "application/json")
+            )
+    except Exception as e:
+        logger.error(f"Error proxying Google login: {e}", exc_info=True)
+        request_id = get_request_id(request)
+        return create_error_response(
+            code="AUTH_SERVICE_ERROR",
+            message="Failed to initiate Google login",
+            status_code=500,
+            request_id=request_id
+        )
+
+
+@router.get("/auth/google/callback")
+async def google_callback_proxy(request: Request):
+    """Proxy Google OAuth callback to auth-service (no JWT required)."""
+    try:
+        import httpx
+        from app.config import get_settings
+        
+        settings = get_settings()
+        query_params = dict(request.query_params)
+        
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            response = await client.get(
+                f"{settings.AUTH_SERVICE_URL}/auth/google/callback",
+                params=query_params
+            )
+            
+            # If it's a redirect, return redirect response
+            if response.status_code in [302, 301, 307, 308]:
+                redirect_url = response.headers.get("location")
+                if redirect_url:
+                    return RedirectResponse(url=redirect_url, status_code=response.status_code)
+            
+            # Otherwise return the response
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                media_type=response.headers.get("content-type", "application/json")
+            )
+    except Exception as e:
+        logger.error(f"Error proxying Google callback: {e}", exc_info=True)
+        request_id = get_request_id(request)
+        return create_error_response(
+            code="AUTH_SERVICE_ERROR",
+            message="Failed to process Google OAuth callback",
             status_code=500,
             request_id=request_id
         )

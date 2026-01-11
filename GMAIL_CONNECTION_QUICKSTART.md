@@ -2,6 +2,19 @@
 
 This guide provides a quick overview of the Gmail OAuth integration and how to get started.
 
+## ⚠️ Important: Gmail OAuth Scope Requirements
+
+**CRITICAL: Gmail Search Queries Require `gmail.readonly` Scope**
+
+The email sync feature uses Gmail search queries (the `q` parameter) to find job-related emails. This requires the `gmail.readonly` scope, **not** `gmail.metadata`.
+
+- ✅ **`gmail.readonly`**: Supports search queries (e.g., `is:unread OR subject:application`)
+- ❌ **`gmail.metadata`**: Does NOT support search queries and will return 403 error: "Metadata scope does not support 'q' parameter"
+
+**If you encounter a 403 error when syncing emails**, it means your Gmail connection has only the `gmail.metadata` scope. **Disconnect and reconnect your Gmail account** to get the correct `gmail.readonly` scope.
+
+The application now automatically requests `gmail.readonly` scope for all new connections. If you have an existing connection with metadata-only scope, you must disconnect and reconnect to get the correct permissions.
+
 ## What Was Implemented
 
 ### Backend Services

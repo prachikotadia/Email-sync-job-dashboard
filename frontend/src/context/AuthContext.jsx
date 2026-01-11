@@ -159,6 +159,53 @@ export function AuthProvider({ children }) {
         }
     }, [accessToken, refreshToken, addToast, clearAuth]);
 
+    const handleGoogleCallback = useCallback(async (accessTokenParam, refreshTokenParam, searchParams) => {
+        console.log('AuthContext - handleGoogleCallback called', {
+            hasAccessToken: !!accessTokenParam,
+            hasRefreshToken: !!refreshTokenParam,
+            userId: searchParams?.get('user_id'),
+            email: searchParams?.get('email')
+        });
+        
+        try {
+            const userId = searchParams?.get('user_id');
+            const email = searchParams?.get('email');
+            
+            console.log('Setting tokens and fetching user info...');
+            
+            // Set tokens FIRST
+            setAccessToken(accessTokenParam);
+            setRefreshToken(refreshTokenParam);
+            localStorage.setItem(ACCESS_TOKEN_KEY, accessTokenParam);
+            localStorage.setItem(REFRESH_TOKEN_KEY, refreshTokenParam);
+            
+            // Fetch user info
+            console.log('Fetching user info from API...');
+            const userInfo = await authService.getMe(accessTokenParam);
+            console.log('User info received:', userInfo);
+            
+            // Set user AFTER fetching (this will trigger isAuthenticated to become true)
+            setUser(userInfo);
+            localStorage.setItem(USER_KEY, JSON.stringify(userInfo));
+            
+            console.log('Google callback completed successfully, auth state updated');
+            addToast('Logged in with Google successfully! Gmail connected.', 'success');
+            
+            // Return user info for navigation
+            return userInfo;
+        } catch (error) {
+            console.error('Google callback error in AuthContext:', error);
+            console.error('Error details:', {
+                message: error.message,
+                response: error.response?.data,
+                status: error.response?.status
+            });
+            clearAuth();
+            addToast(`Failed to complete Google login: ${error.message || 'Unknown error'}`, 'error');
+            throw error;
+        }
+    }, [addToast, clearAuth]);
+
     const isAuthenticated = !!accessToken && !!user;
 
     const value = {
@@ -170,6 +217,7 @@ export function AuthProvider({ children }) {
         login,
         register,
         logout,
+        handleGoogleCallback,
         refreshTokenHandler: handleRefreshToken,
     };
 

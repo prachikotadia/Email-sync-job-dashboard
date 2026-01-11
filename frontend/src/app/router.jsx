@@ -15,6 +15,20 @@ import { useAuth } from '../context/AuthContext';
 function LoginRedirect({ children }) {
     const { isAuthenticated, isLoading } = useAuth();
     const location = useLocation();
+    
+    // Check if we're processing a Google OAuth callback
+    const searchParams = new URLSearchParams(location.search);
+    const isGoogleCallback = searchParams.get('google_login') === 'true' && 
+                             searchParams.get('access_token') && 
+                             searchParams.get('refresh_token');
+
+    console.log('LoginRedirect - Checking redirect:', {
+        isAuthenticated,
+        isLoading,
+        isGoogleCallback,
+        pathname: location.pathname,
+        search: location.search
+    });
 
     if (isLoading) {
         return (
@@ -24,9 +38,12 @@ function LoginRedirect({ children }) {
         );
     }
 
-    if (isAuthenticated) {
+    // Don't redirect if we're processing a Google callback - let Login component handle it
+    // OR if user is authenticated but we're on the login page with callback params
+    if (isAuthenticated && !isGoogleCallback && location.pathname === '/') {
         // Redirect to the page they were trying to access, or dashboard
         const from = location.state?.from?.pathname || '/dashboard';
+        console.log('LoginRedirect - Redirecting authenticated user to:', from);
         return <Navigate to={from} replace />;
     }
 

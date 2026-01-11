@@ -25,6 +25,30 @@ export default function Settings() {
     const [isLoggingOut, setIsLoggingOut] = useState(false);
     const [isCheckingHealth, setIsCheckingHealth] = useState(false);
     const [isLoadingGmailStatus, setIsLoadingGmailStatus] = useState(true);
+    const [redirectUri, setRedirectUri] = useState(null);
+    const [isLoadingRedirectUri, setIsLoadingRedirectUri] = useState(false);
+    const [tokenScopes, setTokenScopes] = useState(null);
+    const [isLoadingScopes, setIsLoadingScopes] = useState(false);
+
+    // Fetch redirect URI configuration
+    const fetchRedirectUri = async () => {
+        setIsLoadingRedirectUri(true);
+        try {
+            const apiUrl = import.meta.env.VITE_API_GATEWAY_URL || 'http://localhost:8000';
+            const response = await fetch(`${apiUrl}/debug/oauth`);
+            if (response.ok) {
+                const data = await response.json();
+                setRedirectUri(data.redirect_uri);
+            } else {
+                setRedirectUri(null);
+            }
+        } catch (error) {
+            console.error('Failed to fetch redirect URI:', error);
+            setRedirectUri(null);
+        } finally {
+            setIsLoadingRedirectUri(false);
+        }
+    };
 
     const fetchHealth = async () => {
         setIsCheckingHealth(true);
@@ -67,11 +91,41 @@ export default function Settings() {
         }
     };
 
+    // Fetch Gmail token scopes (dev only)
+    const fetchTokenScopes = async () => {
+        if (!isAuthenticated || !user || !gmailStatus.is_connected) {
+            setTokenScopes(null);
+            return;
+        }
+
+        setIsLoadingScopes(true);
+        try {
+            const scopes = await gmailService.getScopes();
+            setTokenScopes(scopes);
+        } catch (error) {
+            // Debug endpoint may not be available (not dev mode, or service error)
+            console.warn('Failed to fetch token scopes:', error);
+            setTokenScopes(null);
+        } finally {
+            setIsLoadingScopes(false);
+        }
+    };
+
     useEffect(() => {
         fetchHealth();
+        fetchRedirectUri(); // Fetch redirect URI on mount
         // Only fetch Gmail status if user is authenticated
         if (isAuthenticated && user) {
             fetchGmailStatus();
+        }
+    }, [isAuthenticated, user]); // Re-fetch when auth state changes
+
+    // Fetch token scopes when Gmail is connected
+    useEffect(() => {
+        if (gmailStatus.is_connected) {
+            fetchTokenScopes();
+        } else {
+            setTokenScopes(null);
         }
         // Refresh health status every 30 seconds
         const healthInterval = setInterval(fetchHealth, 30000);
@@ -84,6 +138,7 @@ export default function Settings() {
     useEffect(() => {
         const gmailConnected = searchParams.get('gmail_connected');
         const gmailError = searchParams.get('gmail_error');
+        const errorDetails = searchParams.get('error_details');
         const email = searchParams.get('email');
 
         if (gmailConnected === 'true') {
@@ -94,9 +149,18 @@ export default function Settings() {
             searchParams.delete('email');
             setSearchParams(searchParams);
         } else if (gmailError) {
-            addToast(`Gmail connection failed: ${gmailError}`, 'error');
+            // Show detailed error message
+            let errorMessage = `Gmail connection failed: ${gmailError}`;
+            if (errorDetails) {
+                const decodedDetails = decodeURIComponent(errorDetails);
+                errorMessage += `\n\nDetails: ${decodedDetails}`;
+                // Log to console for debugging
+                console.error('Gmail OAuth Error Details:', decodedDetails);
+            }
+            addToast(errorMessage, 'error', 10000); // Show for 10 seconds for detailed errors
             // Clean up URL params
             searchParams.delete('gmail_error');
+            searchParams.delete('error_details');
             setSearchParams(searchParams);
         }
     }, [searchParams, addToast, fetchGmailStatus, setSearchParams]);
@@ -271,7 +335,7 @@ export default function Settings() {
                             <div className="bg-amber-50 dark:bg-amber-900/20 rounded-xl p-4 border border-amber-100/50 dark:border-amber-800/30 shadow-sm">
                                 <div className="flex">
                                     <AlertTriangle className="h-5 w-5 text-amber-500 dark:text-amber-400 mt-0.5" />
-                                    <div className="ml-3">
+                                    <div className="ml-3 flex-1">
                                         <h3 className="text-sm font-bold text-amber-800 dark:text-amber-300">Permission Scope: Read-Only</h3>
                                         <div className="mt-2 text-sm text-amber-700 dark:text-amber-400">
                                             <p>
@@ -282,6 +346,124 @@ export default function Settings() {
                                     </div>
                                 </div>
                             </div>
+                            
+                            {/* Token Scopes Information */}
+                            {tokenScopes && (
+                                <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-4 border border-blue-100/50 dark:border-blue-800/30 shadow-sm">
+                                    <div className="flex items-start">
+                                        <Shield className="h-5 w-5 text-blue-500 dark:text-blue-400 mt-0.5 flex-shrink-0" />
+                                        <div className="ml-3 flex-1">
+                                            <h3 className="text-sm font-bold text-blue-800 dark:text-blue-300 mb-2">
+                                                Token Scopes (Debug Info)
+                                            </h3>
+                                            <div className="space-y-2 text-xs">
+                                                <div>
+                                                    <span className="font-semibold text-blue-700 dark:text-blue-400">Stored Scopes:</span>
+                                                    <div className="mt-1 bg-white dark:bg-black/20 p-2 rounded border border-blue-200 dark:border-blue-700">
+                                                        {tokenScopes.stored_scopes && tokenScopes.stored_scopes.length > 0 ? (
+                                                            <ul className="list-disc list-inside space-y-1">
+                                                                {tokenScopes.stored_scopes.map((scope, idx) => (
+                                                                    <li key={idx} className="text-blue-900 dark:text-blue-300 font-mono text-xs break-all">
+                                                                        {scope}
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                        ) : (
+                                                            <span className="text-blue-600 dark:text-blue-400">No scopes stored</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <span className="font-semibold text-blue-700 dark:text-blue-400">Actual Token Scopes (from Google):</span>
+                                                    <div className="mt-1 bg-white dark:bg-black/20 p-2 rounded border border-blue-200 dark:border-blue-700">
+                                                        {tokenScopes.tokeninfo_scopes && tokenScopes.tokeninfo_scopes.length > 0 ? (
+                                                            <ul className="list-disc list-inside space-y-1">
+                                                                {tokenScopes.tokeninfo_scopes.map((scope, idx) => (
+                                                                    <li key={idx} className="text-blue-900 dark:text-blue-300 font-mono text-xs break-all">
+                                                                        {scope}
+                                                                        {scope.includes('gmail.readonly') && (
+                                                                            <span className="ml-2 text-green-600 dark:text-green-400">✓</span>
+                                                                        )}
+                                                                        {scope.includes('gmail.metadata') && (
+                                                                            <span className="ml-2 text-red-600 dark:text-red-400">⚠</span>
+                                                                        )}
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                        ) : (
+                                                            <span className="text-blue-600 dark:text-blue-400">Unable to verify</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-4 pt-2 border-t border-blue-200 dark:border-blue-700">
+                                                    <div className="flex items-center">
+                                                        <span className={`h-2 w-2 rounded-full mr-2 ${tokenScopes.has_readonly ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                                                        <span className="font-semibold text-blue-700 dark:text-blue-400">
+                                                            Readonly: {tokenScopes.has_readonly ? '✓ Present' : '✗ Missing'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex items-center">
+                                                        <span className={`h-2 w-2 rounded-full mr-2 ${tokenScopes.has_metadata ? 'bg-amber-500' : 'bg-gray-300'}`}></span>
+                                                        <span className="font-semibold text-blue-700 dark:text-blue-400">
+                                                            Metadata: {tokenScopes.has_metadata ? '⚠ Present' : '✓ Not Present'}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                {tokenScopes.has_metadata && tokenScopes.has_readonly && (
+                                                    <div className="pt-2 bg-amber-50 dark:bg-amber-900/30 rounded-lg p-3 border border-amber-200 dark:border-amber-800">
+                                                        <p className="font-semibold text-amber-800 dark:text-amber-300 mb-1">
+                                                            ⚠️ Warning: Token has BOTH readonly and metadata scopes
+                                                        </p>
+                                                        <p className="text-sm text-amber-700 dark:text-amber-400">
+                                                            When both scopes are present, Google's API uses metadata scope restrictions, 
+                                                            which do NOT support search queries (q parameter). This will cause 403 errors during sync. 
+                                                            <strong className="block mt-1">Please disconnect and reconnect to get ONLY readonly scope.</strong>
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {tokenScopes.has_metadata && !tokenScopes.has_readonly && (
+                                                    <div className="pt-2 bg-red-50 dark:bg-red-900/30 rounded-lg p-3 border border-red-200 dark:border-red-800">
+                                                        <p className="font-semibold text-red-800 dark:text-red-300 mb-1">
+                                                            ❌ Error: Token has ONLY metadata scope (readonly is missing)
+                                                        </p>
+                                                        <p className="text-sm text-red-700 dark:text-red-400">
+                                                            Metadata scope does NOT support search queries. 
+                                                            <strong className="block mt-1">Please disconnect and reconnect to get readonly scope.</strong>
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {!tokenScopes.has_metadata && !tokenScopes.has_readonly && (
+                                                    <div className="pt-2 bg-red-50 dark:bg-red-900/30 rounded-lg p-3 border border-red-200 dark:border-red-800">
+                                                        <p className="font-semibold text-red-800 dark:text-red-300 mb-1">
+                                                            ❌ Error: No Gmail scopes found
+                                                        </p>
+                                                        <p className="text-sm text-red-700 dark:text-red-400">
+                                                            Gmail connection is missing required scopes.
+                                                            <strong className="block mt-1">Please disconnect and reconnect.</strong>
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {!tokenScopes.has_metadata && tokenScopes.has_readonly && (
+                                                    <div className="pt-2 bg-green-50 dark:bg-green-900/30 rounded-lg p-3 border border-green-200 dark:border-green-800">
+                                                        <p className="font-semibold text-green-800 dark:text-green-300 mb-1">
+                                                            ✅ Perfect: Token has ONLY readonly scope
+                                                        </p>
+                                                        <p className="text-sm text-green-700 dark:text-green-400">
+                                                            Your Gmail connection has the correct scope configuration. Email sync with search queries will work correctly.
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {isLoadingScopes && (
+                                <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-4 border border-blue-100/50 dark:border-blue-800/30">
+                                    <p className="text-sm text-blue-700 dark:text-blue-400 text-center">Loading token scope information...</p>
+                                </div>
+                            )}
                             <div className="pt-2">
                                 <NeoButton
                                     variant="danger"
@@ -313,6 +495,37 @@ export default function Settings() {
                                     <Mail className="h-4 w-4 mr-2" />
                                     {isConnectingGmail ? 'Connecting...' : 'Connect with Google'}
                                 </NeoButton>
+                            </div>
+                            
+                            {/* Redirect URI Configuration Info */}
+                            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl p-4 border border-blue-100/50 dark:border-blue-800/30 mt-4">
+                                <div className="flex items-start">
+                                    <AlertTriangle className="h-5 w-5 text-blue-500 dark:text-blue-400 mt-0.5 flex-shrink-0" />
+                                    <div className="ml-3 flex-1">
+                                        <h3 className="text-sm font-bold text-blue-800 dark:text-blue-300 mb-2">OAuth Redirect URI Configuration</h3>
+                                        {isLoadingRedirectUri ? (
+                                            <p className="text-xs text-blue-700 dark:text-blue-400">Loading redirect URI...</p>
+                                        ) : redirectUri ? (
+                                            <div className="space-y-2">
+                                                <p className="text-xs text-blue-700 dark:text-blue-400">
+                                                    Current redirect URI configured:
+                                                </p>
+                                                <div className="bg-white dark:bg-black/20 p-2 rounded border border-blue-200 dark:border-blue-700">
+                                                    <code className="text-xs text-blue-900 dark:text-blue-300 break-all font-mono">
+                                                        {redirectUri}
+                                                    </code>
+                                                </div>
+                                                <p className="text-xs text-blue-600 dark:text-blue-400 mt-2">
+                                                    ⚠️ Make sure this exact URI is registered in Google Cloud Console under "Authorized redirect URIs"
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            <p className="text-xs text-blue-700 dark:text-blue-400">
+                                                Unable to load redirect URI configuration. Make sure API Gateway is running with ENV=dev.
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         )}

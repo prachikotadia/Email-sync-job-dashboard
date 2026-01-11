@@ -1,8 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import gmail_auth
+from app.api import gmail_auth, gmail_sync
 from app.config import get_settings
 import logging
+
+# Import debug router conditionally
+settings = get_settings()
+if settings.ENV == "dev":
+    from app.api import debug
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,6 +31,11 @@ app.add_middleware(
 
 # Routes
 app.include_router(gmail_auth.router, tags=["gmail"])
+app.include_router(gmail_sync.router, tags=["gmail"])
+
+# Debug routes (DEV ONLY)
+if settings.ENV == "dev":
+    app.include_router(debug.router, tags=["debug"])
 
 @app.get("/health")
 def health_check():

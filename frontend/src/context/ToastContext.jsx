@@ -6,14 +6,14 @@ const ToastContext = createContext();
 export function ToastProvider({ children }) {
     const [toasts, setToasts] = useState([]);
 
-    const addToast = useCallback((message, type = 'info') => {
+    const addToast = useCallback((message, type = 'info', duration = 3500) => {
         const id = Date.now();
         setToasts(prev => [...prev, { id, message, type }]);
         // Auto remove handled by NeoToast component essentially via onUnmount logic or timer inside component
         // But for cleanliness we should remove from state too.
         setTimeout(() => {
             setToasts(prev => prev.filter(t => t.id !== id));
-        }, 3500);
+        }, duration);
     }, []);
 
     return (

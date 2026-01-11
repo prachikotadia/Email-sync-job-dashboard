@@ -62,6 +62,22 @@ export const gmailService = {
         const response = await gmailClient.post('/gmail/disconnect');
         return response.data;
     },
+
+    /**
+     * Sync emails from Gmail
+     */
+    async sync() {
+        const response = await gmailClient.post('/gmail/sync');
+        return response.data;
+    },
+
+    /**
+     * Get Gmail token scopes (debug endpoint - dev only)
+     */
+    async getScopes() {
+        const response = await gmailClient.get('/debug/gmail/scopes');
+        return response.data;
+    },
 };
 
 export default gmailService;

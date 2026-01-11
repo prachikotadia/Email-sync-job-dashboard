@@ -1,8 +1,12 @@
 """
 Debug endpoints (development only).
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import Response
 from app.config import get_settings, get_google_redirect_uri
+from app.middleware.auth import require_auth, UserContext
+from app.utils.errors import create_error_response, get_request_id
+import httpx
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,6 +19,54 @@ def check_dev_mode():
     if settings.ENV != "dev":
         raise HTTPException(status_code=404, detail="Debug endpoint not available in production")
     return True
+
+
+@router.get("/debug/gmail/scopes")
+async def debug_gmail_scopes(
+    request: Request,
+    current_user: UserContext = Depends(require_auth),
+    _: bool = Depends(check_dev_mode)
+):
+    """
+    Debug endpoint to check Gmail token scopes (DEV ONLY).
+    
+    Proxies to gmail-connector-service debug endpoint.
+    """
+    request_id = get_request_id(request)
+    
+    try:
+        headers = dict(request.headers)
+        headers.pop("host", None)
+        headers.pop("content-length", None)
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{settings.GMAIL_SERVICE_URL}/debug/gmail/scopes",
+                headers=headers
+            )
+            
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                media_type="application/json"
+            )
+    except httpx.RequestError as e:
+        logger.error(f"Network error getting Gmail scopes: {e}")
+        return create_error_response(
+            code="NETWORK_ERROR",
+            message="Could not connect to Gmail connector service",
+            status_code=503,
+            request_id=request_id
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error getting Gmail scopes: {e}", exc_info=True)
+        return create_error_response(
+            code="GATEWAY_ERROR",
+            message="An unexpected error occurred",
+            status_code=500,
+            request_id=request_id
+        )
 
 
 @router.get("/debug/oauth")

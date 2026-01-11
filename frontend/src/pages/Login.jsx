@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { NeoCard } from '../ui/NeoCard';
 import { NeoButton } from '../ui/NeoButton';
 import { NeoInput } from '../ui/NeoInput';
@@ -9,7 +9,8 @@ import { Mail, Lock, User, UserCircle } from 'lucide-react';
 
 export default function Login() {
     const navigate = useNavigate();
-    const { login, register, isLoading } = useAuth();
+    const [searchParams, setSearchParams] = useSearchParams();
+    const { login, register, isLoading, handleGoogleCallback } = useAuth();
     
     const [mode, setMode] = useState('login'); // 'login' or 'register'
     const [email, setEmail] = useState('');
@@ -18,6 +19,73 @@ export default function Login() {
     const [role, setRole] = useState('viewer');
     const [errors, setErrors] = useState({});
     const [submitting, setSubmitting] = useState(false);
+    const [processingGoogleCallback, setProcessingGoogleCallback] = useState(false); // Prevent duplicate processing
+
+    // Handle Google OAuth callback
+    useEffect(() => {
+        const accessToken = searchParams.get('access_token');
+        const refreshToken = searchParams.get('refresh_token');
+        const googleLogin = searchParams.get('google_login');
+        const googleError = searchParams.get('google_error');
+
+        console.log('Login component - Checking Google callback params:', {
+            hasAccessToken: !!accessToken,
+            hasRefreshToken: !!refreshToken,
+            googleLogin,
+            googleError,
+            hasCallback: !!handleGoogleCallback
+        });
+
+        if (googleError) {
+            // Only log non-critical errors (ignore scope change warnings from Google OAuth library)
+            if (googleError !== 'scope_changed' && !googleError.includes('Scope has changed')) {
+                console.error('Google OAuth error:', googleError);
+            }
+            // Clean up URL params
+            searchParams.delete('google_error');
+            setSearchParams(searchParams, { replace: true });
+            return;
+        }
+
+        if (googleLogin === 'true' && accessToken && refreshToken && !processingGoogleCallback) {
+            console.log('Processing Google login callback...');
+            setProcessingGoogleCallback(true);
+            
+            // Handle Google OAuth callback
+            if (handleGoogleCallback) {
+                handleGoogleCallback(accessToken, refreshToken, searchParams)
+                    .then((userInfo) => {
+                        console.log('Google callback successful, user:', userInfo);
+                        
+                        // Clean up URL params FIRST
+                        const newParams = new URLSearchParams(searchParams);
+                        newParams.delete('access_token');
+                        newParams.delete('refresh_token');
+                        newParams.delete('google_login');
+                        newParams.delete('user_id');
+                        newParams.delete('email');
+                        setSearchParams(newParams, { replace: true });
+                        
+                        // Navigate to dashboard - use window.location for reliable redirect
+                        console.log('Navigating to dashboard...');
+                        // Use window.location for more reliable redirect
+                        setTimeout(() => {
+                            window.location.href = '/dashboard';
+                        }, 100);
+                    })
+                    .catch((error) => {
+                        console.error('Google callback error:', error);
+                        setProcessingGoogleCallback(false);
+                        // Show error to user
+                        alert(`Failed to complete Google login: ${error.message || 'Unknown error'}. Please try again.`);
+                    });
+            } else {
+                console.error('handleGoogleCallback is not available');
+                setProcessingGoogleCallback(false);
+                alert('Google login callback handler not available. Please refresh the page.');
+            }
+        }
+    }, [searchParams, setSearchParams, navigate, handleGoogleCallback]);
 
     const validateForm = () => {
         const newErrors = {};
@@ -247,13 +315,15 @@ export default function Login() {
                         <div className="mt-6">
                             <NeoButton
                                 variant="secondary"
-                                disabled
-                                className="w-full inline-flex justify-center items-center py-3 opacity-60 cursor-not-allowed"
+                                onClick={() => {
+                                    window.location.href = `${import.meta.env.VITE_API_GATEWAY_URL || 'http://localhost:8000'}/auth/google/login`;
+                                }}
+                                className="w-full inline-flex justify-center items-center py-3"
                             >
                                 <svg className="h-5 w-5 mr-2" aria-hidden="true" fill="currentColor" viewBox="0 0 24 24">
                                     <path d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .533 5.333.533 12S5.867 24 12.48 24c3.44 0 6.1-1.12 7.853-2.933 1.787-1.84 2.32-4.427 2.32-6.502 0-.64-.067-1.28-.187-1.889H12.48z" />
                                 </svg>
-                                Google (Coming Soon)
+                                Continue with Google
                             </NeoButton>
                         </div>
                     </div>

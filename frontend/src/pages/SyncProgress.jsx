@@ -1,37 +1,106 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Loader2, CheckCircle2, AlertCircle, Terminal } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { NeoCard } from '../ui/NeoCard';
+import { env } from '../config/env';
 
 export function SyncProgress({ onComplete, onClose }) {
     const [progress, setProgress] = useState(0);
-    const [stage, setStage] = useState('Fetching emails...');
+    const [stage, setStage] = useState('Initializing...');
     const [logs, setLogs] = useState([]);
+    const logsEndRef = useRef(null);
 
     const addLog = (msg) => {
-        setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), msg }]);
+        const time = new Date().toLocaleTimeString();
+        setLogs(prev => [...prev, { time, msg }]);
+        // Auto-scroll to bottom
+        setTimeout(() => {
+            if (logsEndRef.current) {
+                logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+            }
+        }, 100);
     };
 
     useEffect(() => {
-        const interval = setInterval(() => {
-            setProgress(p => {
-                if (p >= 100) {
-                    clearInterval(interval);
-                    setStage('Complete');
-                    addLog('Sync completed successfully.');
-                    setTimeout(onComplete, 1000);
-                    return 100;
+        // Start sync process with Server-Sent Events
+        const startSync = async () => {
+            try {
+                const token = localStorage.getItem('auth_access_token');
+                if (!token) {
+                    addLog('Error: No authentication token found');
+                    setStage('Error');
+                    setTimeout(() => onComplete(), 2000);
+                    return;
                 }
 
-                // Simulation logic
-                if (p === 10) { setStage('Processing emails...'); addLog('Fetched 50 emails from Gmail API'); }
-                if (p === 40) { setStage('Analyzing with AI...'); addLog('AI classifying applications...'); }
-                if (p === 70) { setStage('Updating Database...'); addLog('Upserting job records to DB...'); }
+                const apiUrl = env.API_GATEWAY_URL || 'http://localhost:8000';
+                
+                // Use fetch with streaming for POST request with auth headers
+                const response = await fetch(`${apiUrl}/gmail/sync`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Accept': 'text/event-stream'
+                    }
+                });
 
-                return p + 5;
-            });
-        }, 300);
-        return () => clearInterval(interval);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                if (data.message) {
+                                    addLog(data.message);
+                                }
+                                if (data.progress !== undefined) {
+                                    setProgress(data.progress);
+                                }
+                                if (data.stage) {
+                                    setStage(data.stage);
+                                }
+
+                                // Check if complete
+                                if (data.progress === 100 || data.stage === 'Complete') {
+                                    setTimeout(() => {
+                                        onComplete();
+                                    }, 1500);
+                                } else if (data.stage === 'Error') {
+                                    setTimeout(() => {
+                                        onComplete();
+                                    }, 2000);
+                                }
+                            } catch (e) {
+                                console.error('Error parsing SSE data:', e);
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Sync error:', error);
+                addLog(`Error: ${error.message || 'Sync failed'}`);
+                setStage('Error');
+                setTimeout(() => {
+                    onComplete();
+                }, 2000);
+            }
+        };
+        
+        startSync();
     }, [onComplete]);
 
     return (
@@ -72,12 +141,16 @@ export function SyncProgress({ onComplete, onClose }) {
                 </div>
 
                 <div className="bg-gray-900 rounded-xl p-4 font-mono text-xs text-green-400 h-32 overflow-y-auto custom-scrollbar shadow-inner border border-gray-800">
-                    {logs.map((log, i) => (
-                        <div key={i} className="mb-1">
-                            <span className="text-gray-500">[{log.time}]</span> {log.msg}
-                        </div>
-                    ))}
-                    <div className="animate-pulse">_</div>
+                    {logs.length === 0 ? (
+                        <div className="text-gray-500">Waiting for sync to start...</div>
+                    ) : (
+                        logs.map((log, i) => (
+                            <div key={i} className="mb-1">
+                                <span className="text-gray-500">[{log.time}]</span> <span className="text-green-400">{log.msg}</span>
+                            </div>
+                        ))
+                    )}
+                    <div ref={logsEndRef} className="animate-pulse">_</div>
                 </div>
             </NeoCard>
         </div>

@@ -1,5 +1,5 @@
 import pandas as pd
-from app.db.models import Application
+from app.models import Application
 from typing import List
 import io
 
