@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # Google OAuth Configuration
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
-    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/gmail/callback"  # Goes through API Gateway
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/auth/gmail/callback"  # Goes through API Gateway
     
     # Auth Service URL (to get user info from JWT)
     AUTH_SERVICE_URL: str = "http://localhost:8003"

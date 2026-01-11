@@ -51,6 +51,7 @@ export default function Settings() {
         setIsLoadingGmailStatus(true);
         try {
             const status = await gmailService.getStatus();
+            console.log('Gmail status received:', status);
             setGmailStatus(status);
         } catch (error) {
             // If 401, user is not authenticated - already handled by interceptor

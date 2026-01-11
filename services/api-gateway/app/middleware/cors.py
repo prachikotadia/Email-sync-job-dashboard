@@ -1,6 +1,7 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 from app.config import get_settings
+import logging
 
 settings = get_settings()
 
@@ -8,6 +9,8 @@ settings = get_settings()
 def setup_cors(app: FastAPI):
     """Configure CORS middleware."""
     origins = settings.get_cors_origins()
+    logger = logging.getLogger(__name__)
+    logger.info(f"Configuring CORS with origins: {origins}")
     
     app.add_middleware(
         CORSMiddleware,

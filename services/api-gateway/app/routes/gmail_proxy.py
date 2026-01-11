@@ -3,40 +3,111 @@ Gmail OAuth and connection proxy routes.
 """
 from fastapi import APIRouter, Request, HTTPException, Depends, Query
 from fastapi.responses import RedirectResponse, Response
-from app.middleware.auth import require_auth
+from app.middleware.auth import require_auth, UserContext
 from app.utils.errors import create_error_response, get_request_id
-from app.config import get_settings
+from app.config import get_settings, get_google_redirect_uri
 import httpx
 import logging
-import json
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 settings = get_settings()
 
 # Gmail connector service URL
-GMAIL_SERVICE_URL = "http://localhost:8001"  # Default for local dev, override with env var
+GMAIL_SERVICE_URL = settings.GMAIL_SERVICE_URL
 
 
-@router.get("/gmail/auth/url")
-async def get_gmail_auth_url(request: Request):
-    """Get Gmail OAuth authorization URL (JWT required)."""
+@router.get("/gmail/connect")
+async def connect_gmail(
+    request: Request,
+    current_user: UserContext = Depends(require_auth)
+):
+    """
+    Initiate Gmail OAuth flow (redirects browser to Google).
+    
+    This is the entry point for Gmail connection. The gateway owns the OAuth flow.
+    """
     request_id = get_request_id(request)
     
-    # Verify JWT
-    user_context = await require_auth(request)
-    if not user_context:
+    try:
+        # Get redirect URI (single source of truth)
+        redirect_uri = get_google_redirect_uri()
+        logger.info(f"Initiating Gmail OAuth flow with redirect_uri: {redirect_uri}")
+        
+        # Forward request to gmail-connector-service to get auth URL
+        headers = dict(request.headers)
+        headers.pop("host", None)
+        headers.pop("content-length", None)
+        
+        # Pass redirect_uri as query parameter to gmail-connector-service
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/auth/gmail/url",
+                headers=headers,
+                params={"redirect_uri": redirect_uri}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                auth_url = data.get("auth_url")
+                if auth_url:
+                    logger.info(f"Redirecting to Google OAuth URL")
+                    return RedirectResponse(url=auth_url, status_code=302)
+                else:
+                    logger.error("Auth URL not found in response")
+                    return create_error_response(
+                        code="GMAIL_SERVICE_ERROR",
+                        message="Failed to get Gmail auth URL: auth_url missing in response",
+                        status_code=500,
+                        request_id=request_id
+                    )
+            else:
+                logger.error(f"Gmail service returned error: {response.status_code} - {response.text}")
+                return create_error_response(
+                    code="GMAIL_SERVICE_ERROR",
+                    message=f"Failed to get Gmail auth URL: {response.text}",
+                    status_code=response.status_code,
+                    request_id=request_id
+                )
+    except httpx.RequestError as e:
+        logger.error(f"Network error connecting to gmail-service: {e}")
         return create_error_response(
-            code="UNAUTHORIZED",
-            message="Authentication required",
-            status_code=401,
+            code="NETWORK_ERROR",
+            message="Could not connect to Gmail connector service",
+            status_code=503,
             request_id=request_id
         )
+    except Exception as e:
+        logger.error(f"Unexpected error initiating Gmail OAuth: {e}", exc_info=True)
+        return create_error_response(
+            code="GATEWAY_ERROR",
+            message="An unexpected error occurred in the API Gateway",
+            status_code=500,
+            request_id=request_id
+        )
+
+
+# Keep /gmail/auth/url for backward compatibility (but recommend /gmail/connect)
+@router.get("/gmail/auth/url")
+async def get_gmail_auth_url(
+    request: Request,
+    current_user: UserContext = Depends(require_auth)
+):
+    """
+    Get Gmail OAuth authorization URL (JWT required).
+    
+    DEPRECATED: Use /gmail/connect instead, which redirects directly.
+    This endpoint is kept for backward compatibility.
+    """
+    request_id = get_request_id(request)
     
     # Attach user context to request state
-    request.state.user_context = user_context
+    request.state.user_context = current_user
     
     try:
+        # Get redirect URI (single source of truth)
+        redirect_uri = get_google_redirect_uri()
+        
         # Forward request to gmail-connector-service
         headers = dict(request.headers)
         headers.pop("host", None)
@@ -45,7 +116,8 @@ async def get_gmail_auth_url(request: Request):
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{GMAIL_SERVICE_URL}/auth/gmail/url",
-                headers=headers
+                headers=headers,
+                params={"redirect_uri": redirect_uri}
             )
             
             if response.status_code == 200:
@@ -81,24 +153,49 @@ async def get_gmail_auth_url(request: Request):
         )
 
 
-@router.get("/gmail/callback")
+@router.get("/auth/gmail/callback")
 async def gmail_oauth_callback(
     request: Request,
-    code: str = Query(...),
-    state: str = Query(...),
+    code: str = Query(None),
+    state: str = Query(None),
     error: str = Query(None)
 ):
-    """Handle Gmail OAuth callback (proxy to gmail-connector-service)."""
+    """
+    Handle Gmail OAuth callback (gateway receives callback from Google).
+    
+    This is the public callback endpoint registered in Google Cloud Console.
+    The gateway validates and forwards to gmail-connector-service internal endpoint.
+    """
     request_id = get_request_id(request)
     
+    # Get redirect URI (must match what was used in authorization URL)
+    redirect_uri = get_google_redirect_uri()
+    logger.info(f"OAuth callback received with redirect_uri: {redirect_uri}")
+    
+    # If there's an error (e.g., user denied access), handle it directly
+    if error:
+        logger.warning(f"OAuth callback error: {error}")
+        return RedirectResponse(
+            url=f"http://localhost:5173/settings?gmail_error={error}",
+            status_code=302
+        )
+    
+    # If code or state is missing, redirect with error
+    if not code or not state:
+        logger.error(f"Missing required parameters: code={code is not None}, state={state is not None}")
+        return RedirectResponse(
+            url="http://localhost:5173/settings?gmail_error=invalid_callback",
+            status_code=302
+        )
+    
     try:
-        # Forward callback to gmail-connector-service
+        # Forward callback to gmail-connector-service internal endpoint
+        # Pass redirect_uri to ensure token exchange uses the same URI
         query_params = {
             "code": code,
-            "state": state
+            "state": state,
+            "redirect_uri": redirect_uri  # Pass the redirect URI for token exchange
         }
-        if error:
-            query_params["error"] = error
         
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             response = await client.get(
@@ -133,23 +230,28 @@ async def gmail_oauth_callback(
         )
 
 
+# Keep /gmail/callback as alias for backward compatibility
+@router.get("/gmail/callback")
+async def gmail_oauth_callback_alias(
+    request: Request,
+    code: str = Query(None),
+    state: str = Query(None),
+    error: str = Query(None)
+):
+    """Alias for /auth/gmail/callback (for backward compatibility)."""
+    return await gmail_oauth_callback(request, code, state, error)
+
+
 @router.get("/gmail/status")
-async def get_gmail_status(request: Request):
+async def get_gmail_status(
+    request: Request,
+    current_user: UserContext = Depends(require_auth)
+):
     """Get Gmail connection status (JWT required)."""
     request_id = get_request_id(request)
     
-    # Verify JWT
-    user_context = await require_auth(request)
-    if not user_context:
-        return create_error_response(
-            code="UNAUTHORIZED",
-            message="Authentication required",
-            status_code=401,
-            request_id=request_id
-        )
-    
     # Attach user context to request state
-    request.state.user_context = user_context
+    request.state.user_context = current_user
     
     try:
         headers = dict(request.headers)
@@ -187,22 +289,15 @@ async def get_gmail_status(request: Request):
 
 
 @router.post("/gmail/disconnect")
-async def disconnect_gmail(request: Request):
+async def disconnect_gmail(
+    request: Request,
+    current_user: UserContext = Depends(require_auth)
+):
     """Disconnect Gmail account (JWT required)."""
     request_id = get_request_id(request)
     
-    # Verify JWT
-    user_context = await require_auth(request)
-    if not user_context:
-        return create_error_response(
-            code="UNAUTHORIZED",
-            message="Authentication required",
-            status_code=401,
-            request_id=request_id
-        )
-    
     # Attach user context to request state
-    request.state.user_context = user_context
+    request.state.user_context = current_user
     
     try:
         headers = dict(request.headers)

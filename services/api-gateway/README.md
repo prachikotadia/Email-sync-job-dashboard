@@ -123,6 +123,111 @@ docker run -p 8000:8000 --env-file .env api-gateway
 | `JWT_AUDIENCE` | JWT audience claim | `email-sync-job-dashboard-users` |
 | `APPLICATION_SERVICE_URL` | URL of application-service | `http://application-service:8002` |
 | `AUTH_SERVICE_URL` | URL of auth-service | `http://auth-service:8003` |
+| `GMAIL_SERVICE_URL` | URL of gmail-connector-service | `http://localhost:8001` |
+| `GOOGLE_REDIRECT_URI` | **REQUIRED** - Google OAuth redirect URI (must match Google Cloud Console) | `http://localhost:8000/auth/gmail/callback` |
 | `CORS_ORIGINS` | Comma-separated list of allowed origins | `http://localhost:5173` |
+| `ENV` | Environment (dev, staging, production) | `dev` |
 | `SERVICE_PORT` | Gateway port | `8000` |
 | `HTTP_TIMEOUT` | HTTP client timeout in seconds | `30.0` |
+
+## Google OAuth Configuration
+
+### Setting Up Google Cloud Console
+
+The `GOOGLE_REDIRECT_URI` environment variable **MUST** match exactly what you register in Google Cloud Console.
+
+#### Step 1: Configure Environment Variable
+
+In your `.env` file, you can use EITHER:
+
+**Option A: Gateway URL (recommended for production)**
+```env
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/gmail/callback
+```
+
+**Option B: Gmail Connector Service URL (if already configured in Google Cloud Console)**
+```env
+GOOGLE_REDIRECT_URI=http://localhost:8001/auth/gmail/callback
+```
+
+For production:
+```env
+GOOGLE_REDIRECT_URI=https://yourdomain.com/auth/gmail/callback
+```
+
+**Important**: The redirect URI must match EXACTLY what's registered in Google Cloud Console.
+
+#### Step 2: Register in Google Cloud Console
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Navigate to **APIs & Services** → **Credentials**
+3. Click on your **OAuth 2.0 Client ID**
+4. Scroll to **Authorized redirect URIs**
+5. Click **+ ADD URI**
+6. **Add EXACTLY this URI** (must match your `.env` file `GOOGLE_REDIRECT_URI`):
+   
+   **If using gateway URL:**
+   ```
+   http://localhost:8000/auth/gmail/callback
+   ```
+   
+   **If using gmail-connector-service URL:**
+   ```
+   http://localhost:8001/auth/gmail/callback
+   ```
+   
+   **For production:**
+   ```
+   https://yourdomain.com/auth/gmail/callback
+   ```
+
+7. Click **SAVE**
+
+**Note**: If you already have a redirect URI registered in Google Cloud Console, use that exact URI in your `.env` file. The code will work with either gateway or gmail-connector-service URLs.
+
+#### Important Notes
+
+- **Must match exactly**: The URI in `.env` and Google Cloud Console must be **identical** (character-for-character)
+- **No trailing slash**: Do NOT include a trailing slash (e.g., use `/auth/gmail/callback`, not `/auth/gmail/callback/`)
+- **localhost vs 127.0.0.1**: Google treats `localhost` and `127.0.0.1` as different. If you're having issues, try adding both:
+  - `http://localhost:8000/auth/gmail/callback`
+  - `http://127.0.0.1:8000/auth/gmail/callback`
+- **HTTP vs HTTPS**: 
+  - Local development: Use `http://`
+  - Production: Use `https://`
+- **Port number**: The port must match your gateway's `SERVICE_PORT` (default: 8000)
+
+#### Verify Configuration
+
+In development mode (`ENV=dev`), you can verify your configuration:
+
+```bash
+curl http://localhost:8000/debug/oauth
+```
+
+This returns:
+```json
+{
+  "redirect_uri": "http://localhost:8000/auth/gmail/callback",
+  "gateway_base_url": "http://localhost:8000",
+  "note": "Register this exact redirect_uri in Google Cloud Console 'Authorized redirect URIs'",
+  "google_cloud_console_instructions": {
+    "step_1": "Go to Google Cloud Console → APIs & Services → Credentials",
+    "step_2": "Click on your OAuth 2.0 Client ID",
+    "step_3": "Under 'Authorized redirect URIs', add exactly: http://localhost:8000/auth/gmail/callback",
+    "step_4": "Click Save"
+  }
+}
+```
+
+Copy the `redirect_uri` value and paste it into Google Cloud Console.
+
+### OAuth Flow Architecture
+
+The gateway owns the OAuth flow:
+
+1. **Entry Point**: `GET /gmail/connect` (redirects browser to Google)
+2. **Callback**: `GET /auth/gmail/callback` (receives callback from Google)
+3. **Internal**: Gateway forwards to gmail-connector-service internal endpoints
+
+The redirect URI is managed in a single place (`GOOGLE_REDIRECT_URI` env var) and validated on startup.
