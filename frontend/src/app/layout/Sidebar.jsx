@@ -1,5 +1,5 @@
-import React from 'react';
-import { NavLink } from 'react-router-dom';
+import React, { useState } from 'react';
+import { NavLink, useNavigate } from 'react-router-dom';
 import {
     LayoutDashboard,
     Briefcase,
@@ -10,8 +10,24 @@ import {
     Download
 } from 'lucide-react';
 import { cn } from '../../utils/cn';
+import { useAuth } from '../../context/AuthContext';
 
 export function Sidebar({ isOpen, onClose }) {
+    const { logout, user } = useAuth();
+    const navigate = useNavigate();
+    const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+    const handleLogout = async () => {
+        setIsLoggingOut(true);
+        try {
+            await logout();
+            navigate('/');
+        } catch (error) {
+            console.error('Logout error:', error);
+        } finally {
+            setIsLoggingOut(false);
+        }
+    };
     const navigation = [
         { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
         { name: 'Applications', href: '/applications', icon: Briefcase },
@@ -66,10 +82,19 @@ export function Sidebar({ isOpen, onClose }) {
                 </nav>
 
                 <div className="absolute bottom-0 w-full p-4 border-t border-white/20 dark:border-white/5">
-                    <button className="flex items-center w-full px-4 py-3 text-sm font-medium text-red-500 rounded-xl hover:bg-red-50 dark:hover:bg-red-900/20 hover:shadow-neo transition-all">
+                    <button
+                        onClick={handleLogout}
+                        disabled={isLoggingOut}
+                        className="flex items-center w-full px-4 py-3 text-sm font-medium text-red-500 rounded-xl hover:bg-red-50 dark:hover:bg-red-900/20 hover:shadow-neo transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
                         <LogOut className="mr-3 h-5 w-5" />
-                        Sign Out
+                        {isLoggingOut ? 'Signing out...' : 'Sign Out'}
                     </button>
+                    {user && (
+                        <div className="mt-2 px-4 py-2 text-xs text-text-muted truncate">
+                            {user.email}
+                        </div>
+                    )}
                 </div>
             </div>
         </>

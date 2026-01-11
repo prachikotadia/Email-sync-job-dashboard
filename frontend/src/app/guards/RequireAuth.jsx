@@ -1,16 +1,25 @@
 import { Navigate, useLocation } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
 import { useDemoMode } from '../../hooks/useDemoMode';
 
 export function RequireAuth({ children }) {
     const location = useLocation();
-    // For demo purposes, we assume 'authToken' exists if logged in, 
-    // or just let it pass if we are in "Demo Mode".
-    // MVP: Just check if we are not trying to access login while already logged in.
-
+    const { isAuthenticated, isLoading } = useAuth();
     const { isDemoMode } = useDemoMode();
-    const isAuthenticated = isDemoMode || localStorage.getItem('authToken') !== null;
 
-    if (!isAuthenticated) {
+    // Show loading state while checking authentication
+    if (isLoading) {
+        return (
+            <div className="min-h-screen bg-app flex items-center justify-center">
+                <div className="text-text-secondary">Loading...</div>
+            </div>
+        );
+    }
+
+    // Allow access if authenticated (real auth) or in demo mode
+    const canAccess = isAuthenticated || isDemoMode;
+
+    if (!canAccess) {
         return <Navigate to="/" state={{ from: location }} replace />;
     }
 

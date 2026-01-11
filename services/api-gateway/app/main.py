@@ -1,39 +1,51 @@
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from app.config import settings
-from app.proxy import reverse_proxy
+from fastapi.responses import JSONResponse
+from app.config import get_settings
+from app.middleware.cors import setup_cors
+from app.middleware.request_id import RequestIDMiddleware
+from app.routes import health, auth_proxy, applications_proxy, resumes_proxy, export_proxy, gmail_proxy
+from app.utils.errors import create_error_response, get_request_id
+import logging
 
-app = FastAPI(title="API Gateway")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+settings = get_settings()
+
+app = FastAPI(
+    title="API Gateway",
+    description="API Gateway for Email Sync Job Dashboard",
+    version="1.0.0"
 )
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "service": "api-gateway"}
+# Middleware (order matters)
+app.add_middleware(RequestIDMiddleware)
+setup_cors(app)
 
-# --- Routes ---
 
-# Application Service Forwarding
-@app.api_route("/applications/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-async def application_service_proxy(request: Request, path: str):
-    return await reverse_proxy(request, settings.APPLICATION_SERVICE_URL, f"/applications/{path}")
+# Exception handlers
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    request_id = get_request_id(request)
+    return create_error_response(
+        code="INTERNAL_SERVER_ERROR",
+        message="An unexpected error occurred",
+        status_code=500,
+        request_id=request_id
+    )
 
-# Ingest Endpoint (forwarding to app service as well for now)
-@app.post("/ingest/{path:path}")
-async def ingest_proxy(request: Request, path: str):
-    return await reverse_proxy(request, settings.APPLICATION_SERVICE_URL, f"/ingest/{path}")
 
-# Auth Service Stub
-@app.api_route("/auth/{path:path}", methods=["GET", "POST"])
-async def auth_service_proxy(request: Request, path: str):
-    return await reverse_proxy(request, settings.AUTH_SERVICE_URL, f"/auth/{path}")
+# Routes
+app.include_router(health.router)
+app.include_router(auth_proxy.router)
+app.include_router(applications_proxy.router)
+app.include_router(resumes_proxy.router)
+app.include_router(export_proxy.router)
+app.include_router(gmail_proxy.router)
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.SERVICE_PORT, reload=True)

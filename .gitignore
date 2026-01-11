@@ -1,35 +1,71 @@
-# Node
-node_modules/
-dist/
-dist-ssr/
-*.local
-.npm/
+# Environment files
+.env
+.env.local
+.env.*.local
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
 venv/
-.venv/
+ENV/
 env/
+.venv
+venv-*/
 .env
+.env.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+auth.db
+
+# Logs
+*.log
+uvicorn_*.log
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Editor
-.vscode/
-.idea/
-
-# Docker
-docker-compose.override.yml
+# Uploads
+uploads/
+*.pdf
+*.doc
+*.docx
 
 # Testing
-playwright-report/
-test-results/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp

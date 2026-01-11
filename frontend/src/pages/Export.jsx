@@ -4,21 +4,67 @@ import { useToast } from '../context/ToastContext';
 import { NeoCard } from '../ui/NeoCard';
 import { NeoButton } from '../ui/NeoButton';
 import { NeoSelect } from '../ui/NeoInput';
+import { apiClient } from '../services/api';
+import { useDemoMode } from '../hooks/useDemoMode';
 
 export default function Export() {
     const { addToast } = useToast();
+    const { isDemoMode } = useDemoMode();
     const [dateRange, setDateRange] = useState('30');
     const [statusFilter, setStatusFilter] = useState('all');
     const [isExporting, setIsExporting] = useState(false);
 
-    const handleExport = () => {
+    const handleExport = async () => {
         setIsExporting(true);
         addToast("Generating export...", "info");
 
-        setTimeout(() => {
+        try {
+            if (isDemoMode) {
+                // Demo mode - simulate export
+                setTimeout(() => {
+                    setIsExporting(false);
+                    addToast("Export downloaded successfully (Demo Mode)", "success");
+                }, 2000);
+                return;
+            }
+
+            // Real API call to export endpoint
+            const response = await apiClient.get('/export/excel', {
+                responseType: 'blob', // Important for file downloads
+            });
+
+            // Create download link
+            const blob = new Blob([response.data], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            });
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            
+            // Extract filename from Content-Disposition header if available
+            const contentDisposition = response.headers['content-disposition'];
+            let filename = 'applications_export.xlsx';
+            if (contentDisposition) {
+                const filenameMatch = contentDisposition.match(/filename="?(.+)"?/i);
+                if (filenameMatch) {
+                    filename = filenameMatch[1];
+                }
+            }
+            
+            link.setAttribute('download', filename);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
+
             setIsExporting(false);
             addToast("Export downloaded successfully", "success");
-        }, 2000);
+        } catch (error) {
+            console.error('Export error:', error);
+            setIsExporting(false);
+            const message = error.response?.data?.error?.message || error.message || 'Failed to export data';
+            addToast(message, "error");
+        }
     };
 
     return (

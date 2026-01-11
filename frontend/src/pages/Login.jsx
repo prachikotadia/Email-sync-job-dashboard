@@ -1,17 +1,80 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { NeoCard } from '../ui/NeoCard';
 import { NeoButton } from '../ui/NeoButton';
-import { useDemoMode } from '../hooks/useDemoMode';
+import { NeoInput } from '../ui/NeoInput';
+import { NeoSelect } from '../ui/NeoInput';
+import { useAuth } from '../context/AuthContext';
+import { Mail, Lock, User, UserCircle } from 'lucide-react';
 
 export default function Login() {
     const navigate = useNavigate();
+    const { login, register, isLoading } = useAuth();
+    
+    const [mode, setMode] = useState('login'); // 'login' or 'register'
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [fullName, setFullName] = useState('');
+    const [role, setRole] = useState('viewer');
+    const [errors, setErrors] = useState({});
+    const [submitting, setSubmitting] = useState(false);
 
-    const { enableDemoMode } = useDemoMode();
+    const validateForm = () => {
+        const newErrors = {};
+        
+        if (!email) {
+            newErrors.email = 'Email is required';
+        } else if (!/\S+@\S+\.\S+/.test(email)) {
+            newErrors.email = 'Email is invalid';
+        }
+        
+        if (!password) {
+            newErrors.password = 'Password is required';
+        } else if (password.length < 8) {
+            newErrors.password = 'Password must be at least 8 characters';
+        }
+        
+        if (mode === 'register' && fullName && fullName.trim().length > 255) {
+            newErrors.fullName = 'Full name must be less than 255 characters';
+        }
+        
+        setErrors(newErrors);
+        return Object.keys(newErrors).length === 0;
+    };
 
-    const handleDemoLogin = () => {
-        enableDemoMode();
-        navigate('/dashboard');
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        
+        if (!validateForm()) {
+            return;
+        }
+
+        setSubmitting(true);
+        try {
+            if (mode === 'login') {
+                await login(email, password);
+                navigate('/dashboard');
+            } else {
+                await register(email, password, fullName.trim() || undefined, role);
+                // After successful registration, switch to login mode
+                setMode('login');
+                setPassword('');
+                setFullName('');
+                setErrors({});
+            }
+        } catch (error) {
+            // Error handling is done in AuthContext via toast
+            console.error(`${mode} error:`, error);
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const switchMode = () => {
+        setMode(mode === 'login' ? 'register' : 'login');
+        setErrors({});
+        setPassword('');
+        setFullName('');
     };
 
     return (
@@ -32,16 +95,146 @@ export default function Login() {
 
             <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
                 <NeoCard className="py-8 px-4 sm:px-10">
-                    <div className="space-y-6">
-                        <div>
-                            <NeoButton
-                                onClick={handleDemoLogin}
-                                className="w-full flex justify-center py-3 text-base"
+                    <div className="mb-6">
+                        <div className="flex rounded-xl bg-slate-100 dark:bg-white/5 p-1 border border-white/20 dark:border-white/5">
+                            <button
+                                type="button"
+                                onClick={() => mode !== 'login' && switchMode()}
+                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all ${
+                                    mode === 'login'
+                                        ? 'bg-surface text-text-primary shadow-sm'
+                                        : 'text-text-secondary hover:text-text-primary'
+                                }`}
                             >
-                                Continue (Demo Mode)
-                            </NeoButton>
+                                Login
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => mode !== 'register' && switchMode()}
+                                className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all ${
+                                    mode === 'register'
+                                        ? 'bg-surface text-text-primary shadow-sm'
+                                        : 'text-text-secondary hover:text-text-primary'
+                                }`}
+                            >
+                                Register
+                            </button>
+                        </div>
+                    </div>
+
+                    <form onSubmit={handleSubmit} className="space-y-5">
+                        <div>
+                            <label htmlFor="email" className="block text-sm font-medium text-text-primary mb-2">
+                                Email Address
+                            </label>
+                            <div className="relative">
+                                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                    <Mail className="h-5 w-5 text-text-muted" />
+                                </div>
+                                <NeoInput
+                                    id="email"
+                                    type="email"
+                                    autoComplete="email"
+                                    placeholder="you@example.com"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    error={errors.email}
+                                    className="pl-10"
+                                    disabled={submitting}
+                                />
+                            </div>
                         </div>
 
+                        {mode === 'register' && (
+                            <div>
+                                <label htmlFor="fullName" className="block text-sm font-medium text-text-primary mb-2">
+                                    Full Name (Optional)
+                                </label>
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                        <UserCircle className="h-5 w-5 text-text-muted" />
+                                    </div>
+                                    <NeoInput
+                                        id="fullName"
+                                        type="text"
+                                        autoComplete="name"
+                                        placeholder="John Doe"
+                                        value={fullName}
+                                        onChange={(e) => setFullName(e.target.value)}
+                                        error={errors.fullName}
+                                        className="pl-10"
+                                        disabled={submitting}
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        <div>
+                            <label htmlFor="password" className="block text-sm font-medium text-text-primary mb-2">
+                                Password
+                            </label>
+                            <div className="relative">
+                                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                    <Lock className="h-5 w-5 text-text-muted" />
+                                </div>
+                                <NeoInput
+                                    id="password"
+                                    type="password"
+                                    autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                                    placeholder="••••••••"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    error={errors.password}
+                                    className="pl-10"
+                                    disabled={submitting}
+                                />
+                            </div>
+                            {mode === 'register' && (
+                                <p className="mt-1 text-xs text-text-muted">
+                                    Must be at least 8 characters
+                                </p>
+                            )}
+                        </div>
+
+                        {mode === 'register' && (
+                            <div>
+                                <label htmlFor="role" className="block text-sm font-medium text-text-primary mb-2">
+                                    Role (Optional)
+                                </label>
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                        <User className="h-5 w-5 text-text-muted" />
+                                    </div>
+                                    <NeoSelect
+                                        id="role"
+                                        value={role}
+                                        onChange={(e) => setRole(e.target.value)}
+                                        className="pl-10"
+                                        disabled={submitting}
+                                    >
+                                        <option value="viewer">Viewer (Read-only)</option>
+                                        <option value="editor">Editor (Full access)</option>
+                                    </NeoSelect>
+                                </div>
+                                <p className="mt-1 text-xs text-text-muted">
+                                    First user will automatically get Editor role
+                                </p>
+                            </div>
+                        )}
+
+                        <div>
+                            <NeoButton
+                                type="submit"
+                                loading={submitting}
+                                disabled={submitting || isLoading}
+                                className="w-full flex justify-center py-3 text-base"
+                            >
+                                {mode === 'login' ? 'Sign in' : 'Create Account'}
+                            </NeoButton>
+                        </div>
+                    </form>
+
+                    <div className="mt-6">
                         <div className="relative">
                             <div className="absolute inset-0 flex items-center">
                                 <div className="w-full border-t border-white/20 dark:border-white/5" />
@@ -51,7 +244,7 @@ export default function Login() {
                             </div>
                         </div>
 
-                        <div>
+                        <div className="mt-6">
                             <NeoButton
                                 variant="secondary"
                                 disabled

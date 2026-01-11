@@ -7,17 +7,40 @@
             "type": "string",
             "description": "Subject (User ID)"
         },
+        "email": {
+            "type": "string",
+            "format": "email",
+            "description": "User email address"
+        },
+        "role": {
+            "type": "string",
+            "enum": ["viewer", "editor"],
+            "description": "User role for RBAC"
+        },
+        "iss": {
+            "type": "string",
+            "description": "Issuer"
+        },
+        "aud": {
+            "type": "string",
+            "description": "Audience"
+        },
         "exp": {
             "type": "integer",
-            "description": "Expiration time"
+            "description": "Expiration time (Unix timestamp)"
         },
         "iat": {
             "type": "integer",
-            "description": "Issued at"
+            "description": "Issued at (Unix timestamp)"
         }
     },
     "required": [
         "sub",
-        "exp"
+        "email",
+        "role",
+        "iss",
+        "aud",
+        "exp",
+        "iat"
     ]
 }

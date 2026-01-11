@@ -21,6 +21,7 @@ import { FileText, Briefcase, Calendar, CheckCircle2 } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { useNavigate } from 'react-router-dom';
 import { useMetrics } from '../hooks/useMetrics';
+import { useAuth } from '../context/AuthContext';
 import { SyncProgress } from './SyncProgress';
 import { NeoCard } from '../ui/NeoCard';
 import { NeoButton } from '../ui/NeoButton';
@@ -49,6 +50,7 @@ const COLORS = ['#6366f1', '#3b82f6', '#10b981', '#ef4444', '#9ca3af'];
 export default function Dashboard() {
     const navigate = useNavigate();
     const { metrics, loading } = useMetrics();
+    const { user } = useAuth();
     const [isSyncing, setIsSyncing] = useState(false);
     const [lastSync, setLastSync] = useState(new Date().toLocaleTimeString());
     const [greeting, setGreeting] = useState('Welcome back');
@@ -61,6 +63,24 @@ export default function Dashboard() {
         else if (hour < 18) setGreeting('Good afternoon');
         else setGreeting('Good evening');
     }, []);
+
+    // Get user display name (full_name or email or fallback)
+    const getUserDisplayName = () => {
+        if (user?.full_name) {
+            // Use first name if full name has multiple parts, otherwise use full name
+            const nameParts = user.full_name.trim().split(/\s+/);
+            return nameParts[0] || user.full_name;
+        }
+        if (user?.email) {
+            // Extract name from email (before @) as fallback
+            return user.email.split('@')[0];
+        }
+        return 'there';
+    };
+
+    const getUserFullName = () => {
+        return user?.full_name || user?.email || 'User';
+    };
 
     // Empty State Check
     const metricsList = getMetricsArray(metrics);
@@ -78,9 +98,14 @@ export default function Dashboard() {
                     <div className="bg-indigo-50 dark:bg-indigo-900/30 p-6 rounded-full mb-6 shadow-neo-pressed">
                         <Rocket className="h-10 w-10 text-indigo-600 dark:text-indigo-400" />
                     </div>
-                    <h2 className="text-2xl font-bold text-text-primary mb-2">Welcome to JobPulse AI</h2>
+                    <h2 className="text-2xl font-bold text-text-primary mb-2">
+                        Welcome{user?.full_name ? `, ${getUserDisplayName()}` : ''} to JobPulse AI
+                    </h2>
                     <p className="text-text-secondary mb-8">
-                        It looks like you haven't synced your emails yet. Connect your Gmail account to automatically track your job applications.
+                        {user?.full_name 
+                            ? `${getUserFullName()}, it looks like you haven't synced your emails yet. Connect your Gmail account to automatically track your job applications.`
+                            : "It looks like you haven't synced your emails yet. Connect your Gmail account to automatically track your job applications."
+                        }
                     </p>
                     <NeoButton
                         onClick={() => navigate('/onboarding')}
@@ -101,9 +126,14 @@ export default function Dashboard() {
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 px-1 animate-fadeIn">
                 <div>
                     <h1 className="text-3xl font-bold text-text-primary tracking-tight">
-                        {greeting}, <span className="text-indigo-600 dark:text-indigo-400">Alex</span>
+                        {greeting}, <span className="text-indigo-600 dark:text-indigo-400">{getUserDisplayName()}</span>
                     </h1>
-                    <p className="text-sm text-text-secondary mt-1">Here's what's happening with your job search today.</p>
+                    <p className="text-sm text-text-secondary mt-1">
+                        {user?.full_name 
+                            ? `${getUserFullName()}, here's what's happening with your job search today.`
+                            : "Here's what's happening with your job search today."
+                        }
+                    </p>
                 </div>
                 <div className="flex items-center space-x-4">
                     <div className="text-right hidden sm:block">
@@ -240,6 +270,28 @@ export default function Dashboard() {
                 </div>
 
                 <div className="col-span-12 lg:col-span-4 flex flex-col gap-6 animate-slideUp" style={{ animationDelay: '500ms' }}>
+                    {/* User Profile Widget */}
+                    {user && (
+                        <NeoCard className="p-6 bg-gradient-to-br from-indigo-50 to-indigo-100 dark:from-indigo-900/20 dark:to-indigo-800/20 border-indigo-200 dark:border-indigo-800/50">
+                            <div className="flex items-center space-x-4">
+                                <div className="h-14 w-14 rounded-xl bg-indigo-600 dark:bg-indigo-500 flex items-center justify-center text-white font-bold text-xl shadow-neo-button flex-shrink-0">
+                                    {(user.full_name || user.email)?.charAt(0).toUpperCase() || 'U'}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-bold text-indigo-900 dark:text-indigo-200 truncate">
+                                        {user.full_name || 'User'}
+                                    </p>
+                                    <p className="text-xs text-indigo-700 dark:text-indigo-300 truncate">
+                                        {user.email}
+                                    </p>
+                                    <p className="text-xs text-indigo-600 dark:text-indigo-400 mt-1">
+                                        {user.role === 'editor' ? '👑 Editor' : '👁️ Viewer'}
+                                    </p>
+                                </div>
+                            </div>
+                        </NeoCard>
+                    )}
+
                     {/* Action Required Widget */}
                     <NeoCard className="flex-1 min-h-[180px] bg-gradient-to-br from-indigo-600 to-indigo-700 text-white relative overflow-hidden !border-none group">
                         <div className="absolute top-0 right-0 -mt-2 -mr-2 bg-white/10 w-32 h-32 rounded-full blur-3xl transition-transform duration-700 group-hover:scale-150"></div>
