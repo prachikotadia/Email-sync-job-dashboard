@@ -252,16 +252,53 @@ async def google_login_proxy(request: Request):
             params["redirect_uri"] = redirect_uri
         
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
-            response = await client.get(
-                f"{settings.AUTH_SERVICE_URL}/auth/google/login",
-                params=params
-            )
+            try:
+                response = await client.get(
+                    f"{settings.AUTH_SERVICE_URL}/auth/google/login",
+                    params=params
+                )
+            except httpx.ConnectError as e:
+                logger.error(f"Cannot connect to auth-service at {settings.AUTH_SERVICE_URL}: {e}")
+                request_id = get_request_id(request)
+                return create_error_response(
+                    code="AUTH_SERVICE_UNAVAILABLE",
+                    message=f"Auth service is not running or not accessible at {settings.AUTH_SERVICE_URL}. Please check if auth-service is running on port 8003.",
+                    status_code=503,
+                    request_id=request_id
+                )
+            except httpx.TimeoutException as e:
+                logger.error(f"Timeout connecting to auth-service: {e}")
+                request_id = get_request_id(request)
+                return create_error_response(
+                    code="AUTH_SERVICE_TIMEOUT",
+                    message="Auth service did not respond in time. Please check if auth-service is running.",
+                    status_code=503,
+                    request_id=request_id
+                )
             
             # If it's a redirect, return redirect response
             if response.status_code in [302, 301, 307, 308]:
                 redirect_url = response.headers.get("location")
                 if redirect_url:
                     return RedirectResponse(url=redirect_url, status_code=response.status_code)
+            
+            # If auth-service returned an error, log it and return better error message
+            if response.status_code >= 400:
+                error_text = response.text
+                logger.error(f"Auth-service returned error {response.status_code}: {error_text}")
+                try:
+                    error_json = response.json()
+                    error_detail = error_json.get("detail", error_text)
+                except:
+                    error_detail = error_text
+                
+                request_id = get_request_id(request)
+                return create_error_response(
+                    code="AUTH_SERVICE_ERROR",
+                    message=f"Auth service error: {error_detail}",
+                    status_code=response.status_code,
+                    request_id=request_id
+                )
             
             # Otherwise return the response
             return Response(
@@ -275,7 +312,7 @@ async def google_login_proxy(request: Request):
         request_id = get_request_id(request)
         return create_error_response(
             code="AUTH_SERVICE_ERROR",
-            message="Failed to initiate Google login",
+            message=f"Failed to initiate Google login: {str(e)}",
             status_code=500,
             request_id=request_id
         )

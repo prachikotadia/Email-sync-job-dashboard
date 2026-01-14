@@ -27,6 +27,9 @@ if (-not (Test-Path (Join-Path $scriptPath ".env"))) {
     # .env should have been created by setup-env.ps1
 }
 
+# Use venv Python explicitly
+$pythonExe = Join-Path $venvPath "Scripts\python.exe"
+
 # Start the service
 Write-Host "Starting auth-service on port 8003..." -ForegroundColor Cyan
-python -m uvicorn app.main:app --reload --port 8003
+& $pythonExe -m uvicorn app.main:app --host 0.0.0.0 --port 8003

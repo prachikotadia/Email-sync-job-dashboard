@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # Application Service URL (for ingesting processed emails)
     APPLICATION_SERVICE_URL: str = "http://localhost:8002"
     
+    # Email Intelligence Service URL (for email classification)
+    EMAIL_INTELLIGENCE_SERVICE_URL: str = "http://localhost:8004"
+    
     # Service
     SERVICE_NAME: str = "gmail-connector-service"
     SERVICE_PORT: int = 8001
@@ -26,6 +29,18 @@ class Settings(BaseSettings):
     # Database for storing OAuth tokens (use auth-service database or separate)
     # For simplicity, we'll use a shared database or API calls to auth-service
     DATABASE_URL: str = "sqlite:///./gmail_tokens.db"
+    
+    # Job Email Filtering Configuration
+    GMAIL_SYNC_DAYS: int = 180  # Days to look back for emails (GMAIL_QUERY_DAYS)
+    GMAIL_QUERY_DAYS: int = 180  # Days to look back in Gmail query
+    GMAIL_MAX_RESULTS: int = 50  # Maximum emails to fetch per sync
+    CLASSIFIER_MIN_CONFIDENCE: float = 0.85  # Minimum confidence to store (Stage 2)
+    HEURISTIC_ACCEPT: int = 6  # Minimum score to process email
+    HEURISTIC_REJECT: int = 0  # Maximum score to reject email
+    LLM_MIN_CONFIDENCE: float = 0.75  # Minimum confidence to store email
+    MAX_EMAILS_PER_SYNC: int = 200  # Maximum emails to process per sync
+    DRY_RUN: bool = False  # If True, don't store emails, only audit
+    STORE_CATEGORIES: str = "APPLIED_CONFIRMATION,INTERVIEW,REJECTION,OFFER,ASSESSMENT"  # Comma-separated list of categories to store
     
     class Config:
         env_file = ".env"

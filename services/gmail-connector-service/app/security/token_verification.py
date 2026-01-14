@@ -11,35 +11,38 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-async def verify_token_scopes(access_token: str) -> Dict[str, any]:
+async def verify_token_scopes(access_token: str) -> tuple[bool, Optional[List[str]]]:
     """
-    Verify access token scopes using Google's tokeninfo endpoint.
+    Verify access token scopes using Google's tokeninfo endpoint (OPTIONAL DEBUG ONLY).
+    
+    This is NOT a blocking gate - Gmail API 401 is authoritative.
+    If tokeninfo fails, we return (False, None) and continue with Gmail API call.
     
     Args:
         access_token: The OAuth access token to verify
         
     Returns:
-        Dict with:
-        - scopes: List of scopes from tokeninfo
-        - has_readonly: bool - whether gmail.readonly is present
-        - has_metadata: bool - whether gmail.metadata is present
-        - user_id: str - Google user ID (if available)
-        - expires_in: int - seconds until expiration (if available)
+        Tuple of (success: bool, scopes: List[str]|None):
+        - If tokeninfo succeeds: (True, list of scopes)
+        - If tokeninfo fails: (False, None)
         
-    Raises:
-        ValueError: If token is invalid or verification fails
+    NEVER raises exceptions - always returns a result.
     """
+    if not access_token:
+        logger.warning("Tokeninfo: Access token is empty")
+        return False, None
+    
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
                 "https://oauth2.googleapis.com/tokeninfo",
                 params={"access_token": access_token}
             )
             
             if response.status_code != 200:
-                error_text = response.text
-                logger.error(f"Tokeninfo verification failed: {response.status_code} - {error_text}")
-                raise ValueError(f"Token verification failed: {error_text}")
+                # Tokeninfo failed - log warning but don't block
+                logger.warning(f"Tokeninfo returned {response.status_code} (non-blocking, continuing with Gmail API)")
+                return False, None
             
             tokeninfo = response.json()
             
@@ -47,27 +50,16 @@ async def verify_token_scopes(access_token: str) -> Dict[str, any]:
             scope_str = tokeninfo.get("scope", "")
             scopes = scope_str.split() if scope_str else []
             
-            # Check for required scopes
-            has_readonly = "https://www.googleapis.com/auth/gmail.readonly" in scopes
-            has_metadata = "https://www.googleapis.com/auth/gmail.metadata" in scopes
+            logger.debug(f"Tokeninfo verification: scopes={scopes}")
             
-            logger.info(f"Tokeninfo verification: scopes={scopes}, has_readonly={has_readonly}, has_metadata={has_metadata}")
+            return True, scopes
             
-            return {
-                "scopes": scopes,
-                "has_readonly": has_readonly,
-                "has_metadata": has_metadata,
-                "user_id": tokeninfo.get("user_id"),
-                "expires_in": tokeninfo.get("expires_in"),
-                "audience": tokeninfo.get("aud"),
-                "issued_to": tokeninfo.get("issued_to")
-            }
     except httpx.RequestError as e:
-        logger.error(f"Network error verifying token: {e}")
-        raise ValueError(f"Failed to verify token: network error")
+        logger.warning(f"Tokeninfo network error (non-blocking): {e}")
+        return False, None
     except Exception as e:
-        logger.error(f"Error verifying token: {e}", exc_info=True)
-        raise ValueError(f"Token verification failed: {str(e)}")
+        logger.warning(f"Tokeninfo error (non-blocking): {e}")
+        return False, None
 
 
 def require_readonly_scope(tokeninfo_result: Dict) -> None:

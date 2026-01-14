@@ -10,6 +10,7 @@ import { NeoCard } from '../ui/NeoCard';
 import { NeoButton } from '../ui/NeoButton';
 import { NeoInput } from '../ui/NeoInput';
 import { NeoBadge } from '../ui/NeoBadge';
+import { SyncProgress } from './SyncProgress';
 
 export default function Settings() {
     const { addToast } = useToast();
@@ -29,6 +30,7 @@ export default function Settings() {
     const [isLoadingRedirectUri, setIsLoadingRedirectUri] = useState(false);
     const [tokenScopes, setTokenScopes] = useState(null);
     const [isLoadingScopes, setIsLoadingScopes] = useState(false);
+    const [isSyncing, setIsSyncing] = useState(false);
 
     // Fetch redirect URI configuration
     const fetchRedirectUri = async () => {
@@ -226,7 +228,16 @@ export default function Settings() {
     };
 
     return (
-        <div className="max-w-3xl mx-auto space-y-8 pb-12">
+        <div className="max-w-3xl mx-auto space-y-8 pb-12 relative">
+            {isSyncing && (
+                <SyncProgress 
+                    onComplete={() => {
+                        setIsSyncing(false);
+                        fetchGmailStatus(); // Refresh Gmail status after sync
+                    }} 
+                    onClose={() => setIsSyncing(false)} 
+                />
+            )}
             <div className="flex justify-between items-start">
                 <div>
                     <h1 className="text-3xl font-bold text-text-primary tracking-tight">Settings</h1>
@@ -464,7 +475,15 @@ export default function Settings() {
                                     <p className="text-sm text-blue-700 dark:text-blue-400 text-center">Loading token scope information...</p>
                                 </div>
                             )}
-                            <div className="pt-2">
+                            <div className="pt-2 space-y-3">
+                                <NeoButton
+                                    onClick={() => setIsSyncing(true)}
+                                    disabled={isSyncing}
+                                    className="w-full flex justify-center items-center"
+                                >
+                                    <RefreshCw className="h-4 w-4 mr-2" />
+                                    {isSyncing ? 'Syncing...' : 'Sync Emails Now'}
+                                </NeoButton>
                                 <NeoButton
                                     variant="danger"
                                     onClick={handleDisconnectGmail}

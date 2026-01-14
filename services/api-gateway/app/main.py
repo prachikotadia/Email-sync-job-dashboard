@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.middleware.cors import setup_cors
 from app.middleware.request_id import RequestIDMiddleware
-from app.routes import health, auth_proxy, applications_proxy, resumes_proxy, export_proxy, gmail_proxy, debug
+from app.routes import health, auth_proxy, applications_proxy, resumes_proxy, export_proxy, gmail_proxy, metrics_proxy, debug
 from app.utils.errors import create_error_response, get_request_id
 import logging
 
@@ -24,7 +24,8 @@ except ValueError as e:
 app = FastAPI(
     title="API Gateway",
     description="API Gateway for Email Sync Job Dashboard",
-    version="1.0.0"
+    version="1.0.0",
+    redirect_slashes=False  # Disable automatic redirects for trailing slashes
 )
 
 # Middleware (order matters - CORS should be added first to handle preflight requests)
@@ -50,6 +51,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(health.router)
 app.include_router(auth_proxy.router)
 app.include_router(applications_proxy.router)
+app.include_router(metrics_proxy.router)
 app.include_router(resumes_proxy.router)
 app.include_router(export_proxy.router)
 app.include_router(gmail_proxy.router)

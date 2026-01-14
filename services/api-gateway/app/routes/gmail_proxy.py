@@ -262,7 +262,10 @@ async def sync_gmail_emails(
         
         async def generate():
             try:
-                async with httpx.AsyncClient(timeout=120.0) as client:  # Increased timeout for streaming
+                logger.info(f"Forwarding sync request to {GMAIL_SERVICE_URL}/gmail/sync")
+                # Use a longer timeout for streaming (5 minutes for read, since sync can take time)
+                timeout = httpx.Timeout(300.0, connect=10.0, read=300.0, write=10.0, pool=10.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     async with client.stream(
                         "POST",
                         f"{GMAIL_SERVICE_URL}/gmail/sync",
@@ -271,13 +274,23 @@ async def sync_gmail_emails(
                         # Check if response is successful
                         if response.status_code != 200:
                             error_text = await response.aread()
-                            logger.error(f"Gmail service returned error: {response.status_code} - {error_text.decode()}")
-                            yield f"data: {json.dumps({'message': f'Sync failed: HTTP {response.status_code}', 'progress': 0, 'stage': 'Error'})}\n\n".encode()
+                            error_msg = error_text.decode() if error_text else f"HTTP {response.status_code}"
+                            logger.error(f"Gmail service returned error: {response.status_code} - {error_msg}")
+                            yield f"data: {json.dumps({'message': f'Sync failed: {error_msg}', 'progress': 0, 'stage': 'Error'})}\n\n".encode()
                             return
                         
+                        logger.info("Streaming SSE response from Gmail service")
                         # Stream the SSE response
                         async for chunk in response.aiter_bytes():
                             yield chunk
+            except httpx.ConnectError as e:
+                logger.error(f"Connection error in sync stream: {e}")
+                error_msg = json.dumps({'message': f'Cannot connect to Gmail service. Please ensure all services are running.', 'progress': 0, 'stage': 'Error'})
+                yield f"data: {error_msg}\n\n".encode()
+            except httpx.TimeoutException as e:
+                logger.error(f"Timeout error in sync stream: {e}")
+                error_msg = json.dumps({'message': f'Sync request timed out. Please try again.', 'progress': 0, 'stage': 'Error'})
+                yield f"data: {error_msg}\n\n".encode()
             except httpx.RequestError as e:
                 logger.error(f"Network error in sync stream: {e}")
                 error_msg = json.dumps({'message': f'Network error: {str(e)}', 'progress': 0, 'stage': 'Error'})

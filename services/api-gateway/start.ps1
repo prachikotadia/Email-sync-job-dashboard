@@ -21,6 +21,9 @@ if (-not (Test-Path $venvPath)) {
 Write-Host "Activating virtual environment..." -ForegroundColor Cyan
 & (Join-Path $venvPath "Scripts\Activate.ps1")
 
+# Use venv Python explicitly
+$pythonExe = Join-Path $venvPath "Scripts\python.exe"
+
 # Check if .env exists
 if (-not (Test-Path (Join-Path $scriptPath ".env"))) {
     Write-Host "⚠️  .env file not found. Creating from defaults..." -ForegroundColor Yellow
@@ -30,4 +33,4 @@ if (-not (Test-Path (Join-Path $scriptPath ".env"))) {
 # Start the service
 Write-Host "Starting api-gateway on port 8000..." -ForegroundColor Cyan
 Write-Host "Make sure auth-service (8003) and application-service (8002) are running!" -ForegroundColor Yellow
-python -m uvicorn app.main:app --reload --port 8000
+& $pythonExe -m uvicorn app.main:app --host 0.0.0.0 --port 8000

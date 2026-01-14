@@ -38,7 +38,7 @@ export default function Applications() {
     // Hooks
     const filterStatus = searchParams.get('status') || 'All';
     const searchQuery = searchParams.get('q') || '';
-    const { applications, loading, isDemoMode } = useApplications({ status: filterStatus });
+    const { applications, loading } = useApplications({ status: filterStatus });
 
     const [selectedApp, setSelectedApp] = useState(null);
     const [selectedIds, setSelectedIds] = useState(new Set());
@@ -62,16 +62,33 @@ export default function Applications() {
         navigate(`/applications/${app.id}`);
     };
 
-    // Filtering
+    // Filtering - also filter out invalid statuses
     const filteredApps = useMemo(() => {
+        // Valid job application statuses
+        const validStatuses = ["Applied", "Interview", "Rejected", "Ghosted", "Accepted/Offer", 
+                              "Screening", "Interview (R1)", "Interview (R2)", "Interview (Final)",
+                              "Offer", "Accepted", "Hired"];
+        
         return applications.filter(app => {
+            // First, filter out invalid/Unknown statuses
+            const status = app.status || "";
+            const isValidStatus = validStatuses.includes(status) || 
+                                 status.includes("Interview") || 
+                                 ["Offer", "Accepted", "Hired"].includes(status);
+            if (!isValidStatus || status === "Unknown") {
+                return false; // Don't show invalid statuses
+            }
+            
+            // Then apply user filters
             const matchesStatus = filterStatus === 'All' || app.status === filterStatus;
             let matchesSearch = true;
             if (searchQuery) {
                 const lowerQuery = searchQuery.toLowerCase();
+                const companyName = (app.company || app.company_name || '').toLowerCase();
+                const roleName = (app.role || app.role_title || '').toLowerCase();
                 matchesSearch =
-                    app.company.toLowerCase().includes(lowerQuery) ||
-                    app.role.toLowerCase().includes(lowerQuery);
+                    companyName.includes(lowerQuery) ||
+                    roleName.includes(lowerQuery);
             }
             return matchesStatus && matchesSearch;
         });
@@ -101,17 +118,21 @@ export default function Applications() {
             key: 'company',
             header: 'Company',
             sortable: true,
-            render: (app) => (
-                <div className="flex items-center">
-                    <div className="h-9 w-9 rounded-xl bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-700 dark:text-indigo-400 font-bold shadow-neo-pressed mr-3">
-                        {app.company.charAt(0)}
+            render: (app) => {
+                const companyName = app.company || app.company_name || 'Unknown';
+                const firstLetter = companyName && companyName.length > 0 ? companyName.charAt(0).toUpperCase() : '?';
+                return (
+                    <div className="flex items-center">
+                        <div className="h-9 w-9 rounded-xl bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center text-indigo-700 dark:text-indigo-400 font-bold shadow-neo-pressed mr-3">
+                            {firstLetter}
+                        </div>
+                        <div>
+                            <div className="font-bold text-text-primary">{companyName}</div>
+                            <div className="text-xs text-text-secondary">{app.count || 1} emails</div>
+                        </div>
                     </div>
-                    <div>
-                        <div className="font-bold text-text-primary">{app.company}</div>
-                        <div className="text-xs text-text-secondary">{app.count || 1} emails</div>
-                    </div>
-                </div>
-            )
+                );
+            }
         },
         { key: 'role', header: 'Role', sortable: true },
         {
@@ -173,15 +194,6 @@ export default function Applications() {
 
     return (
         <div className="space-y-6">
-            {isDemoMode && (
-                <NeoCard className="bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/30 p-4 !shadow-sm flex items-start">
-                    <AlertTriangle className="h-5 w-5 text-amber-500 dark:text-amber-400 mr-3 flex-shrink-0" />
-                    <p className="text-sm text-amber-800 dark:text-amber-300">
-                        <span className="font-bold">Demo Mode:</span> You are viewing simulated data. Adjust filters to test UI interactions.
-                    </p>
-                </NeoCard>
-            )}
-
             <div className="sm:flex sm:items-center sm:justify-between">
                 <div>
                     <h1 className="text-3xl font-bold text-text-primary tracking-tight">Applications</h1>

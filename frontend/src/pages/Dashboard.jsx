@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
     RefreshCcw,
-    ArrowUpRight,
     ArrowRight,
     Rocket,
     Clock,
@@ -21,19 +20,12 @@ import { FileText, Briefcase, Calendar, CheckCircle2 } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { useNavigate } from 'react-router-dom';
 import { useMetrics } from '../hooks/useMetrics';
+import { useApplications } from '../hooks/useApplications';
 import { useAuth } from '../context/AuthContext';
 import { SyncProgress } from './SyncProgress';
 import { NeoCard } from '../ui/NeoCard';
 import { NeoButton } from '../ui/NeoButton';
-
-// Constants would usually be imported
-const MOCK_CHART_DATA = [
-    { name: 'Applied', value: 45 },
-    { name: 'Interview', value: 8 },
-    { name: 'Offer', value: 2 },
-    { name: 'Rejected', value: 32 },
-    { name: 'Ghosted', value: 37 },
-];
+import { formatTimeAgo } from '../utils/format';
 
 // Map metrics object to array for display
 const getMetricsArray = (data) => {
@@ -45,16 +37,65 @@ const getMetricsArray = (data) => {
         { title: 'Offers', value: data.offers, icon: CheckCircle2, color: 'text-emerald-600 dark:text-emerald-400', bg: 'bg-emerald-50 dark:bg-emerald-900/20' }
     ];
 };
+
+// Calculate chart data from real applications
+const calculateChartData = (applications) => {
+    if (!applications || applications.length === 0) {
+        return [];
+    }
+    
+    // Filter out invalid statuses first
+    const validStatuses = ["Applied", "Interview", "Rejected", "Ghosted", "Accepted/Offer", 
+                           "Screening", "Interview (R1)", "Interview (R2)", "Interview (Final)",
+                           "Offer", "Accepted", "Hired"];
+    const validApps = applications.filter(app => {
+        const status = app.status || "";
+        const isValid = validStatuses.includes(status) || 
+                       status.includes("Interview") || 
+                       ["Offer", "Accepted", "Hired"].includes(status);
+        return isValid && status !== "Unknown";
+    });
+    
+    const statusCounts = {
+        'Applied': 0,
+        'Interview': 0,
+        'Accepted/Offer': 0,
+        'Rejected': 0,
+        'Ghosted': 0
+    };
+    
+    validApps.forEach(app => {
+        const status = app.status || '';
+        if (status.includes('Interview') || status === 'Screening') {
+            statusCounts['Interview']++;
+        } else if (status === 'Offer' || status === 'Accepted' || status === 'Hired' || status === 'Accepted/Offer') {
+            statusCounts['Accepted/Offer']++;
+        } else if (status === 'Rejected') {
+            statusCounts['Rejected']++;
+        } else if (app.ghosted) {
+            statusCounts['Ghosted']++;
+        } else if (status === 'Applied' || !status) {
+            statusCounts['Applied']++;
+        }
+    });
+    
+    return Object.entries(statusCounts)
+        .filter(([_, count]) => count > 0)
+        .map(([name, value]) => ({ name, value }));
+};
+
 const COLORS = ['#6366f1', '#3b82f6', '#10b981', '#ef4444', '#9ca3af'];
 
 export default function Dashboard() {
     const navigate = useNavigate();
-    const { metrics, loading } = useMetrics();
+    const { metrics, loading: metricsLoading } = useMetrics();
+    const { applications, loading: applicationsLoading, refresh: refreshApplications } = useApplications();
     const { user } = useAuth();
     const [isSyncing, setIsSyncing] = useState(false);
     const [lastSync, setLastSync] = useState(new Date().toLocaleTimeString());
     const [greeting, setGreeting] = useState('Welcome back');
     const [activeIndex, setActiveIndex] = useState(null);
+    const [recentEmails, setRecentEmails] = useState([]);
 
     // Time-based greeting
     useEffect(() => {
@@ -85,10 +126,29 @@ export default function Dashboard() {
     // Empty State Check
     const metricsList = getMetricsArray(metrics);
     const hasData = metrics && metrics.total > 0;
+    const loading = metricsLoading || applicationsLoading;
+    
+    // Calculate chart data from real applications
+    const chartData = calculateChartData(applications);
 
     const handleSyncComplete = () => {
         setIsSyncing(false);
         setLastSync(new Date().toLocaleTimeString());
+        // Refresh applications after sync
+        refreshApplications();
+        // Clear recent emails after a delay
+        setTimeout(() => setRecentEmails([]), 5000);
+    };
+    
+    const handleEmailAdded = (emailData) => {
+        // Add to recent emails list
+        setRecentEmails(prev => [...prev, {
+            ...emailData,
+            id: Date.now() + Math.random(), // Temporary ID
+            timestamp: new Date()
+        }]);
+        // Refresh applications in real-time
+        refreshApplications();
     };
 
     if (!hasData && !loading) {
@@ -120,7 +180,7 @@ export default function Dashboard() {
 
     return (
         <div className="space-y-8 relative">
-            {isSyncing && <SyncProgress onComplete={handleSyncComplete} onClose={() => setIsSyncing(false)} />}
+            {isSyncing && <SyncProgress onComplete={handleSyncComplete} onClose={() => setIsSyncing(false)} onEmailAdded={handleEmailAdded} />}
 
             {/* Header Area in Grid */}
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 px-1 animate-fadeIn">
@@ -151,6 +211,53 @@ export default function Dashboard() {
                 </div>
             </div>
 
+            {/* Real-time Email Feed During Sync */}
+            {isSyncing && recentEmails.length > 0 && (
+                <NeoCard className="mb-6 animate-slideDown border-2 border-green-200 dark:border-green-800 bg-gradient-to-r from-green-50 to-indigo-50 dark:from-green-900/20 dark:to-indigo-900/20">
+                    <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2 bg-green-500 rounded-lg animate-pulse">
+                                <CheckCircle className="h-5 w-5 text-white" />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold text-text-primary">
+                                    Adding Emails Step by Step
+                                </h3>
+                                <p className="text-sm text-text-secondary">
+                                    {recentEmails.length} email{recentEmails.length !== 1 ? 's' : ''} processed and stored
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {recentEmails.slice().reverse().map((email, i) => (
+                            <div 
+                                key={email.id || i} 
+                                className="bg-white dark:bg-slate-800 rounded-lg p-4 border-2 border-green-300 dark:border-green-700 shadow-lg animate-scaleIn hover:scale-105 transition-transform"
+                                style={{ animationDelay: `${i * 100}ms` }}
+                            >
+                                <div className="flex items-start justify-between">
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                                            <p className="text-sm font-bold text-text-primary truncate">
+                                                {email.company_name || 'New Application'}
+                                            </p>
+                                        </div>
+                                        <p className="text-xs text-text-secondary truncate mb-1">
+                                            {email.role || 'Job Application'}
+                                        </p>
+                                        <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300">
+                                            {email.status || 'Applied'}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </NeoCard>
+            )}
+
             {/* 12-Column Grid Layout */}
             <div className="grid grid-cols-12 gap-6">
 
@@ -175,7 +282,7 @@ export default function Dashboard() {
                     </div>
                 ))}
 
-                {/* Row 2: Status Chart + Needs Review/Action */}
+                {/* Row 2: Status Chart */}
                 <div className="col-span-12 lg:col-span-8 animate-slideUp" style={{ animationDelay: '400ms' }}>
                     <NeoCard className="h-[400px] flex flex-col">
                         <div className="flex justify-between items-center mb-6">
@@ -184,10 +291,15 @@ export default function Dashboard() {
                                 <p className="text-xs text-text-muted">Current status distribution</p>
                             </div>
                         </div>
-                        <div className="flex-1 w-full min-h-0">
-                            <ResponsiveContainer width="100%" height="100%">
+                        <div className="flex-1 w-full" style={{ height: '340px', minHeight: '300px', width: '100%', position: 'relative' }}>
+                            {chartData.length === 0 ? (
+                                <div className="flex items-center justify-center h-full text-text-secondary">
+                                    <p>No data available</p>
+                                </div>
+                            ) : (
+                            <ResponsiveContainer width="100%" height={340}>
                                 <BarChart
-                                    data={MOCK_CHART_DATA}
+                                    data={chartData}
                                     margin={{ top: 20, right: 30, left: 0, bottom: 0 }}
                                     onMouseMove={(state) => {
                                         if (state.isTooltipActive) {
@@ -199,7 +311,7 @@ export default function Dashboard() {
                                     onMouseLeave={() => setActiveIndex(null)}
                                 >
                                     <defs>
-                                        {MOCK_CHART_DATA.map((entry, index) => (
+                                        {chartData.map((entry, index) => (
                                             <linearGradient key={`gradient-${index}`} id={`color-${index}`} x1="0" y1="0" x2="0" y2="1">
                                                 <stop offset="5%" stopColor={COLORS[index % COLORS.length]} stopOpacity={0.8} />
                                                 <stop offset="95%" stopColor={COLORS[index % COLORS.length]} stopOpacity={0.3} />
@@ -231,7 +343,7 @@ export default function Dashboard() {
                                                         <div className="flex items-center space-x-2">
                                                             <div
                                                                 className="w-3 h-3 rounded-full"
-                                                                style={{ backgroundColor: data.payload.fill?.replace('url(#color-', '').replace(')', '') || COLORS[0] }}
+                                                                style={{ backgroundColor: COLORS[chartData.findIndex(d => d.name === label) % COLORS.length] }}
                                                             />
                                                             <p className="text-xl font-bold text-text-primary">
                                                                 {data.value}
@@ -250,7 +362,7 @@ export default function Dashboard() {
                                         barSize={45}
                                         animationDuration={1500}
                                     >
-                                        {MOCK_CHART_DATA.map((entry, index) => (
+                                        {chartData.map((entry, index) => (
                                             <Cell
                                                 key={`cell-${index}`}
                                                 fill={`url(#color-${index})`}
@@ -265,6 +377,7 @@ export default function Dashboard() {
                                     </Bar>
                                 </BarChart>
                             </ResponsiveContainer>
+                            )}
                         </div>
                     </NeoCard>
                 </div>
@@ -291,81 +404,112 @@ export default function Dashboard() {
                             </div>
                         </NeoCard>
                     )}
-
-                    {/* Action Required Widget */}
-                    <NeoCard className="flex-1 min-h-[180px] bg-gradient-to-br from-indigo-600 to-indigo-700 text-white relative overflow-hidden !border-none group">
-                        <div className="absolute top-0 right-0 -mt-2 -mr-2 bg-white/10 w-32 h-32 rounded-full blur-3xl transition-transform duration-700 group-hover:scale-150"></div>
-                        <h3 className="text-lg font-bold relative z-10 mb-2 flex items-center">
-                            Action Required
-                            <span className="ml-2 flex h-2 w-2 relative">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-white"></span>
-                            </span>
-                        </h3>
-                        <div className="relative z-10 space-y-3">
-                            <div className="bg-white/10 backdrop-blur-md p-3 rounded-lg border border-white/10 flex items-center justify-between hover:bg-white/20 transition-colors cursor-pointer">
-                                <div>
-                                    <p className="font-bold text-sm">Verify 2 Applications</p>
-                                    <p className="text-xs text-indigo-200">Low confidence matches</p>
-                                </div>
-                                <ArrowRight className="h-4 w-4 text-white/70" />
-                            </div>
-                            <div className="bg-white/10 backdrop-blur-md p-3 rounded-lg border border-white/10 flex items-center justify-between hover:bg-white/20 transition-colors cursor-pointer">
-                                <div>
-                                    <p className="font-bold text-sm">Upload Resume</p>
-                                    <p className="text-xs text-indigo-200">For "Frontend Dev" role</p>
-                                </div>
-                                <ArrowRight className="h-4 w-4 text-white/70" />
-                            </div>
-                        </div>
-                    </NeoCard>
-
-                    {/* Quick Stat */}
-                    <NeoCard className="flex-1 min-h-[150px] flex flex-col justify-center items-center text-center relative overflow-hidden">
-                        <div className="absolute inset-0 bg-gradient-to-b from-transparent to-surface dark:to-black/20 pointer-events-none"></div>
-                        <p className="text-sm text-text-secondary font-medium relative z-10">Response Rate</p>
-                        <p className="text-4xl font-black text-text-primary my-2 relative z-10">12%</p>
-                        <p className="text-xs text-emerald-600 dark:text-emerald-400 font-bold bg-emerald-50 dark:bg-emerald-900/20 px-2 py-1 rounded-full relative z-10 flex items-center">
-                            <ArrowUpRight className="h-3 w-3 mr-1" />
-                            +2% vs last week
-                        </p>
-                    </NeoCard>
                 </div>
 
                 {/* Bottom Row: Recent Activity Timeline */}
                 <div className="col-span-12 animate-slideUp" style={{ animationDelay: '600ms' }}>
                     <NeoCard>
                         <div className="flex items-center justify-between mb-6">
-                            <h3 className="text-lg font-bold text-text-primary">Recent Activity</h3>
+                            <h3 className="text-lg font-bold text-text-primary">
+                                Recent Activity
+                                {isSyncing && recentEmails.length > 0 && (
+                                    <span className="ml-2 text-sm font-normal text-indigo-600 dark:text-indigo-400 animate-pulse">
+                                        • Adding {recentEmails.length} email{recentEmails.length !== 1 ? 's' : ''}...
+                                    </span>
+                                )}
+                            </h3>
                             <NeoButton variant="ghost" size="sm" onClick={() => navigate('/applications')}>
                                 View All
                             </NeoButton>
                         </div>
                         <div className="relative pl-4 space-y-6 before:absolute before:inset-y-0 before:left-[19px] before:w-0.5 before:bg-slate-200 dark:before:bg-white/10">
-                            {[
-                                { company: 'Google', status: 'Interview', time: '2h ago', icon: Calendar, color: 'text-amber-500', bg: 'bg-amber-100 dark:bg-amber-900/30' },
-                                { company: 'Netflix', status: 'Offer Received', time: '5h ago', icon: CheckCircle, color: 'text-emerald-500', bg: 'bg-emerald-100 dark:bg-emerald-900/30' },
-                                { company: 'Amazon', status: 'Application Sent', time: '1d ago', icon: FileText, color: 'text-blue-500', bg: 'bg-blue-100 dark:bg-blue-900/30' }
-                            ].map((item, i) => (
-                                <div key={i} className="relative pl-8 group">
-                                    <div className={cn(
-                                        "absolute left-0 top-1 p-1.5 rounded-full border-2 border-white dark:border-app shadow-sm transition-transform group-hover:scale-110",
-                                        item.bg, item.color
-                                    )}>
-                                        <item.icon className="h-3 w-3" />
-                                    </div>
-                                    <div className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/5 transition-colors cursor-pointer border border-transparent hover:border-slate-100 dark:hover:border-white/5">
-                                        <div>
-                                            <p className="text-sm font-bold text-text-primary">{item.company}</p>
-                                            <p className="text-xs text-text-secondary">{item.status}</p>
+                            {/* Show recently added emails first during sync */}
+                            {isSyncing && recentEmails.length > 0 && (
+                                <>
+                                    {recentEmails.slice().reverse().map((email, i) => (
+                                        <div key={email.id || i} className="relative pl-8 group animate-slideInRight" style={{ animationDelay: `${i * 100}ms` }}>
+                                            <div className="absolute left-0 top-1 p-1.5 rounded-full border-2 border-white dark:border-app shadow-sm bg-green-100 dark:bg-green-900/30 text-green-500 animate-pulse">
+                                                <CheckCircle className="h-3 w-3" />
+                                            </div>
+                                            <div className="flex items-center justify-between p-3 rounded-xl bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800 hover:bg-green-100 dark:hover:bg-green-900/20 transition-all">
+                                                <div>
+                                                    <p className="text-sm font-bold text-text-primary">
+                                                        {email.company_name || 'New Application'}
+                                                        <span className="ml-2 text-xs font-normal text-green-600 dark:text-green-400">NEW</span>
+                                                    </p>
+                                                    <p className="text-xs text-text-secondary">{email.role || 'Job Application'}</p>
+                                                    <p className="text-xs text-green-600 dark:text-green-400 mt-1">{email.status || 'Applied'}</p>
+                                                </div>
+                                                <span className="text-xs text-text-muted font-medium flex items-center">
+                                                    <Clock className="h-3 w-3 mr-1" />
+                                                    Just now
+                                                </span>
+                                            </div>
                                         </div>
-                                        <span className="text-xs text-text-muted font-medium flex items-center">
-                                            <Clock className="h-3 w-3 mr-1" />
-                                            {item.time}
-                                        </span>
-                                    </div>
+                                    ))}
+                                </>
+                            )}
+                            {applications && applications.length > 0 ? (
+                                // Filter out invalid statuses before displaying
+                                applications
+                                    .filter(app => {
+                                        const status = app.status || "";
+                                        const validStatuses = ["Applied", "Interview", "Rejected", "Ghosted", "Accepted/Offer", 
+                                                             "Screening", "Interview (R1)", "Interview (R2)", "Interview (Final)",
+                                                             "Offer", "Accepted", "Hired"];
+                                        const isValid = validStatuses.includes(status) || 
+                                                       status.includes("Interview") || 
+                                                       ["Offer", "Accepted", "Hired"].includes(status);
+                                        return isValid && status !== "Unknown";
+                                    })
+                                    .slice(0, 5)
+                                    .map((app, i) => {
+                                    // Determine icon and color based on status
+                                    let icon = FileText;
+                                    let color = 'text-blue-500';
+                                    let bg = 'bg-blue-100 dark:bg-blue-900/30';
+                                    
+                                    if (app.status && (app.status.includes('Interview') || app.status === 'Screening')) {
+                                        icon = Calendar;
+                                        color = 'text-amber-500';
+                                        bg = 'bg-amber-100 dark:bg-amber-900/30';
+                                    } else if (app.status === 'Offer' || app.status === 'Accepted' || app.status === 'Hired' || app.status === 'Accepted/Offer') {
+                                        icon = CheckCircle;
+                                        color = 'text-emerald-500';
+                                        bg = 'bg-emerald-100 dark:bg-emerald-900/30';
+                                    }
+                                    
+                                    // Format time ago
+                                    const timeAgo = app.last_email_date 
+                                        ? formatTimeAgo(app.last_email_date)
+                                        : 'Unknown';
+                                    
+                                    return (
+                                        <div key={app.id || i} className="relative pl-8 group">
+                                            <div className={cn(
+                                                "absolute left-0 top-1 p-1.5 rounded-full border-2 border-white dark:border-app shadow-sm transition-transform group-hover:scale-110",
+                                                bg, color
+                                            )}>
+                                                {React.createElement(icon, { className: "h-3 w-3" })}
+                                            </div>
+                                            <div className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/5 transition-colors cursor-pointer border border-transparent hover:border-slate-100 dark:hover:border-white/5">
+                                                <div>
+                                                    <p className="text-sm font-bold text-text-primary">{app.company_name}</p>
+                                                    <p className="text-xs text-text-secondary">{app.status || 'Applied'}</p>
+                                                </div>
+                                                <span className="text-xs text-text-muted font-medium flex items-center">
+                                                    <Clock className="h-3 w-3 mr-1" />
+                                                    {timeAgo}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    );
+                                })
+                            ) : (
+                                <div className="text-center py-8 text-text-secondary">
+                                    <p>No recent activity</p>
                                 </div>
-                            ))}
+                            )}
                         </div>
                     </NeoCard>
                 </div>

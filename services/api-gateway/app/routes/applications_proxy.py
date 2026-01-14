@@ -11,6 +11,7 @@ router = APIRouter()
 
 
 @router.get("/applications")
+@router.get("/applications/")
 async def get_applications(
     request: Request,
     current_user: UserContext = Depends(require_auth),
@@ -40,13 +41,15 @@ async def get_applications(
         if status:
             params["status"] = status
         
+        # Use /applications/ with trailing slash to match service
         response = await application_client.forward_request(
             method="GET",
-            path="/applications",
+            path="/applications/",
             headers=headers,
             params=params
         )
         
+        # Return Response directly (NOT RedirectResponse) to avoid browser redirects
         return Response(
             content=response.content,
             status_code=response.status_code,
@@ -54,7 +57,7 @@ async def get_applications(
             media_type="application/json"
         )
     except Exception as e:
-        logger.error(f"Error proxying GET /applications: {e}")
+        logger.error(f"Error proxying GET /applications: {e}", exc_info=True)
         request_id = get_request_id(request)
         return create_error_response(
             code="APPLICATION_SERVICE_ERROR",

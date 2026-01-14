@@ -87,7 +87,7 @@ export const appClient = apiClient;
 // Health check - now uses API Gateway
 export const checkHealth = async () => {
     try {
-        const gatewayHealth = await apiClient.get('/health', { timeout: 5000 }).catch(() => ({ status: 500 }));
+        const gatewayHealth = await apiClient.get('/health', { timeout: 15000 }).catch(() => ({ status: 500 }));
         const isGatewayHealthy = gatewayHealth.status === 200;
         
         return {

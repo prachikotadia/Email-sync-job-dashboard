@@ -598,7 +598,16 @@ async def google_callback(
         
     except Exception as e:
         logger.error(f"Error in Google OAuth callback: {e}", exc_info=True)
-        error_msg = urllib.parse.quote(str(e))
+        
+        # Check if it's a database connection error
+        error_str = str(e).lower()
+        if 'could not translate host name' in error_str or 'name or service not known' in error_str or 'operationalerror' in error_str:
+            # Database connection error - provide helpful message
+            error_msg = urllib.parse.quote("Database connection failed. Please check your database configuration and network connectivity.")
+            logger.error("Database connection error detected. Check AUTH_DATABASE_URL in .env file and ensure the database is accessible.")
+        else:
+            error_msg = urllib.parse.quote(str(e))
+        
         return RedirectResponse(
             url=f"{frontend_url}/?google_error={error_msg}",
             status_code=302

@@ -14,9 +14,9 @@ export function useBackendStatus(autoCheck = true, interval = 30000) {
         setStatus(prev => ({ ...prev, isLoading: true }));
         
         try {
-            // Check API Gateway
+            // Check API Gateway with longer timeout (health check may take time to check other services)
             const gatewayResponse = await apiClient.get('/health', {
-                timeout: 5000,
+                timeout: 15000, // Increased to 15 seconds to allow health checks of downstream services
             }).catch(() => null);
 
             const gatewayStatus = gatewayResponse?.status === 200;

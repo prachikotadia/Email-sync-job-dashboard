@@ -31,10 +31,19 @@ async def startup_event():
     logger.info("Starting auth-service...")
     try:
         init_db()
-        logger.info("Database initialized")
+        logger.info("✅ Database initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
+        error_str = str(e).lower()
+        # Check if it's a connection error (network/DNS issue)
+        if 'could not translate host name' in error_str or 'name or service not known' in error_str or 'operationalerror' in error_str:
+            logger.error(f"❌ Database connection failed: {e}")
+            logger.error("⚠️  Service will start but database operations will fail until connection is restored.")
+            logger.error("💡 Tip: For local development, use SQLite by setting AUTH_DATABASE_URL=sqlite:///./auth.db in .env")
+            # Don't raise - allow service to start, but database operations will fail
+            # This allows the service to at least respond to health checks
+        else:
+            logger.error(f"Failed to initialize database: {e}")
+            raise  # Re-raise for other errors
 
 
 # Routes

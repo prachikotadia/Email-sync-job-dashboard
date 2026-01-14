@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, Integer, DateTime, Boolean, Float, ForeignKey, JSON, Table
 from sqlalchemy.orm import relationship, declarative_base
-from sqlalchemy.dialects.postgresql import UUID, ARRAY
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
 import uuid
 from datetime import datetime
 
@@ -47,7 +48,7 @@ class Resume(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     file_name = Column(String, nullable=False)
     storage_url = Column(String, nullable=False)
-    tags = Column(ARRAY(String), default=[])
+    tags = Column(JSON, default=[])  # JSON for SQLite compatibility, can store array as JSON
     created_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", back_populates="resumes")
