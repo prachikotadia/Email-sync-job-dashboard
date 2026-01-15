@@ -79,11 +79,25 @@ export const authService = {
      * @returns {Promise<{id: string, email: string, role: string}>}
      */
     async getMe(accessToken) {
-        const response = await authClient.get('/auth/me', {
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-            },
-        });
-        return response.data;
+        try {
+            const response = await authClient.get('/auth/me', {
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                },
+            });
+            // Ensure we always return a valid object, never undefined
+            if (!response.data || typeof response.data !== 'object') {
+                throw new Error('Invalid user data received from server');
+            }
+            return response.data;
+        } catch (error) {
+            // Log error for debugging
+            console.error('getMe error:', error);
+            // Re-throw with more context
+            if (error.response?.status === 401) {
+                throw new Error('Authentication failed. Please login again.');
+            }
+            throw error;
+        }
     },
 };

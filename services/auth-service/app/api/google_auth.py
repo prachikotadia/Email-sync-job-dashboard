@@ -176,12 +176,81 @@ async def google_login(redirect_uri: str = Query(None)):
         
         return RedirectResponse(url=authorization_url, status_code=302)
         
+    except ValueError as e:
+        # Common local-dev case: Google OAuth env vars not set
+        logger.error(f"Google OAuth not configured: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google OAuth is not configured on the server. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in auth-service .env."
+        )
     except Exception as e:
         logger.error(f"Error initiating Google OAuth login: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to initiate Google login: {str(e)}"
         )
+
+
+@router.get("/auth/google/status")
+async def google_oauth_status(request: Request, db: Session = Depends(get_db)):
+    """
+    Return Google OAuth status with stable JSON schema.
+    Checks for authentication via cookies or Authorization header.
+    CRITICAL: Must return valid JSON, never undefined.
+    """
+    from typing import Optional
+    from app.security.jwt import verify_token
+    from app.db.repo import UserRepository
+    
+    # Check if OAuth is configured
+    is_configured = bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)
+    
+    # Try to get token from cookie first, then Authorization header
+    access_token = None
+    refresh_token = None
+    
+    # Check cookies (for session-based auth)
+    if "access_token" in request.cookies:
+        access_token = request.cookies.get("access_token")
+    if "refresh_token" in request.cookies:
+        refresh_token = request.cookies.get("refresh_token")
+    
+    # Fallback to Authorization header
+    if not access_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            access_token = auth_header.split(" ")[1]
+    
+    # Verify token and get user if authenticated
+    user = None
+    is_authenticated = False
+    
+    if access_token:
+        payload = verify_token(access_token)
+        if payload:
+            user_id_str = payload.get("sub")
+            if user_id_str:
+                user_repo = UserRepository(db)
+                db_user = user_repo.get_by_id(user_id_str)
+                if db_user:
+                    is_authenticated = True
+                    user = {
+                        "id": db_user.id,
+                        "email": db_user.email,
+                        "full_name": db_user.full_name,
+                        "role": db_user.role
+                    }
+    
+    # CRITICAL: Always return valid object, never undefined
+    return {
+        "authenticated": is_authenticated,
+        "isAuthenticated": is_authenticated,  # Keep both for compatibility
+        "hasAccessToken": bool(access_token),
+        "hasRefreshToken": bool(refresh_token),
+        "user": user,  # Will be None if not authenticated, but always present
+        "configured": is_configured,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+    }
 
 
 @router.get("/auth/google/callback")
@@ -210,10 +279,22 @@ async def google_callback(
                 logger.info(f"Ignoring scope change warning from Google (this is normal): {error}")
                 # Continue with the flow - don't treat as error
                 # But we still need code and state to proceed
+            elif 'access_denied' in error_lower or '403' in error_lower:
+                # Handle access denied (usually means user not in test users list)
+                logger.warning(f"OAuth access denied from Google: {error}")
+                error_msg = urllib.parse.quote(
+                    "Access denied: This app is in testing mode. "
+                    "Please add your email as a test user in Google Cloud Console. "
+                    "See: https://console.cloud.google.com/apis/credentials/consent"
+                )
+                return RedirectResponse(
+                    url=f"{frontend_url}/?google_error={error_msg}",
+                    status_code=302
+                )
             else:
                 logger.warning(f"OAuth error from Google: {error}")
                 return RedirectResponse(
-                    url=f"{frontend_url}/?google_error={error}",
+                    url=f"{frontend_url}/?google_error={urllib.parse.quote(error)}",
                     status_code=302
                 )
         
@@ -580,8 +661,36 @@ async def google_callback(
         else:
             logger.error(f"ERROR: Gmail connection was NOT found after storing for user {user.id}")
         
-        # Redirect to frontend with tokens in URL (frontend will extract and store)
-        # Encode tokens for URL - redirect to /login to ensure Login component handles callback
+        # CRITICAL: Set cookies for session management
+        # This allows frontend to read session state via /auth/google/status
+        from fastapi.responses import RedirectResponse as FastAPIRedirectResponse
+        
+        # Create redirect response
+        redirect_url = f"{frontend_url}/?google_login=true&user_id={user.id}&email={urllib.parse.quote(user.email)}"
+        response = FastAPIRedirectResponse(url=redirect_url, status_code=302)
+        
+        # Set secure cookies (httponly, samesite=lax for localhost)
+        response.set_cookie(
+            key="access_token",
+            value=access_token,
+            httponly=True,  # Prevent XSS attacks
+            secure=False,  # False for localhost, True for HTTPS in production
+            samesite="lax",  # NOT "none" for localhost - allows cookies in same-site requests
+            max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # Expire when token expires
+            path="/",  # Available to all paths
+        )
+        
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token_value,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,  # Expire when refresh token expires
+            path="/",
+        )
+        
+        # Also include tokens in URL for frontend compatibility (frontend can extract and store in localStorage)
         params = urllib.parse.urlencode({
             "access_token": access_token,
             "refresh_token": refresh_token_value,
@@ -589,12 +698,12 @@ async def google_callback(
             "email": user.email,
             "google_login": "true"
         })
+        redirect_url_with_params = f"{frontend_url}/?{params}"
         
-        logger.info(f"Redirecting to frontend with Google login success: {frontend_url}/?{params[:100]}...")
-        return RedirectResponse(
-            url=f"{frontend_url}/?{params}",
-            status_code=302
-        )
+        logger.info(f"Setting cookies and redirecting to frontend: {redirect_url_with_params[:100]}...")
+        response.headers["Location"] = redirect_url_with_params
+        
+        return response
         
     except Exception as e:
         logger.error(f"Error in Google OAuth callback: {e}", exc_info=True)

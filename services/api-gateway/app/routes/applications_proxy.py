@@ -4,6 +4,7 @@ from app.clients.application_client import application_client
 from app.middleware.auth import require_auth, UserContext, check_rbac
 from app.utils.errors import create_error_response, get_request_id, add_user_headers
 import logging
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ async def get_applications(
             params["status"] = status
         
         # Use /applications/ with trailing slash to match service
+        try:
         response = await application_client.forward_request(
             method="GET",
             path="/applications/",
@@ -56,6 +58,24 @@ async def get_applications(
             headers=dict(response.headers),
             media_type="application/json"
         )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error to application-service: {e}")
+            request_id = get_request_id(request)
+            return create_error_response(
+                code="SERVICE_UNAVAILABLE",
+                message="Application service is temporarily unavailable. Please try again in a moment.",
+                status_code=503,
+                request_id=request_id
+            )
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout connecting to application-service: {e}")
+            request_id = get_request_id(request)
+            return create_error_response(
+                code="SERVICE_TIMEOUT",
+                message="Application service request timed out. Please try again.",
+                status_code=504,
+                request_id=request_id
+            )
     except Exception as e:
         logger.error(f"Error proxying GET /applications: {e}", exc_info=True)
         request_id = get_request_id(request)

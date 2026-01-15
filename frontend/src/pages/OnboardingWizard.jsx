@@ -50,25 +50,8 @@ export function OnboardingWizard({ onComplete }) {
     };
 
     const handleSync = async () => {
-        setIsConnecting(true);
-        try {
-            if (isDemoMode) {
-                await mockApi.syncGmail();
-            } else {
-                await emailAiClient.post('/gmail/sync');
-            }
-            setStep(3);
-        } catch (e) {
-            console.error("Sync failed", e);
-            if (!isDemoMode) {
-                enableDemoMode();
-                await mockApi.syncGmail();
-                addToast("Sync failed. Switched to Demo Mode.", 'warning');
-                setStep(3);
-            }
-        } finally {
-            setIsConnecting(false);
-        }
+        // Redirect to dashboard - sync button is there
+        onComplete();
     };
 
     return (
@@ -134,11 +117,10 @@ export function OnboardingWizard({ onComplete }) {
                             </p>
                         </div>
                         <NeoButton
-                            onClick={handleSync}
-                            disabled={isConnecting}
+                            onClick={onComplete}
                             className="px-8 py-3 text-lg"
                         >
-                            {isConnecting ? 'Scanning...' : 'Start Initial Sync'}
+                            Go to Dashboard <ArrowRight className="ml-2 h-5 w-5 inline" />
                         </NeoButton>
                     </div>
                 )}

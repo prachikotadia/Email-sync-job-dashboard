@@ -1,0 +1,30 @@
+{
+  "name": "email-sync-job-dashboard",
+  "version": "1.0.0",
+  "description": "Cross-platform Gmail email sync and job application tracking dashboard",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "scripts": {
+    "setup": "node setup.js",
+    "verify": "node verify.js",
+    "dev": "node start-all.js",
+    "start:all": "node start-all.js",
+    "start:frontend": "cd frontend && npm run dev",
+    "start:gateway": "cd services/api-gateway && node ../start-service.js",
+    "start:auth": "cd services/auth-service && node ../start-service.js",
+    "start:gmail": "cd services/gmail-connector-service && node ../start-service.js",
+    "start:app": "cd services/application-service && node ../start-service.js",
+    "start:email": "cd services/email-intelligence-service && node ../start-service.js",
+    "start:notif": "cd services/notification-service && node ../start-service.js"
+  },
+  "keywords": [
+    "gmail",
+    "email-sync",
+    "job-tracking",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "MIT"
+}

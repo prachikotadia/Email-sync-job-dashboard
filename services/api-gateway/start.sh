@@ -31,4 +31,4 @@ fi
 # Start the service
 echo "Starting api-gateway on port 8000..."
 echo "Make sure auth-service (8003) and application-service (8002) are running!"
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

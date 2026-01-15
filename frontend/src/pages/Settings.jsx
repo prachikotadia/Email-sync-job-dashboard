@@ -234,6 +234,12 @@ export default function Settings() {
                     onComplete={() => {
                         setIsSyncing(false);
                         fetchGmailStatus(); // Refresh Gmail status after sync
+                        // Dispatch event for Dashboard/Applications pages to refresh
+                        window.dispatchEvent(new CustomEvent('sync-complete'));
+                        // Refresh applications by reloading page - wait for backend to finish
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 3000); // Wait 3 seconds for backend to finish processing
                     }} 
                     onClose={() => setIsSyncing(false)} 
                 />

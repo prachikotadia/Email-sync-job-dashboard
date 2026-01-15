@@ -13,46 +13,39 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-def build_job_gmail_query(days: int = None) -> str:
+def build_job_gmail_query(days: int = None, last_synced_date: str = None) -> str:
     """
-    Build EXTREMELY STRICT Gmail search query for job application emails only.
+    Build Gmail query - NO FILTERING at query level (RULE 2).
     
-    Stage 1 pre-filter - only fetches likely job-related emails.
-    Uses only strong phrases - NOT broad keywords.
+    RULE 2: Fetch latest emails WITHOUT filtering.
+    Filtering happens AFTER fetching, NOT at Gmail query level.
     
     Args:
-        days: Number of days to look back (defaults to GMAIL_QUERY_DAYS from config)
+        days: Number of days to look back (defaults to 180)
+        last_synced_date: ISO format date string - if provided, only fetch emails newer than this
         
     Returns:
-        Gmail search query string
+        Gmail search query string (time-based only, NO keyword filtering)
     """
     if days is None:
         days = getattr(settings, 'GMAIL_QUERY_DAYS', 180)
     
-    # STRICT positive phrases - must include at least one strong phrase
-    positive_phrases = (
-        '"thank you for applying" OR "application received" OR "application submitted" OR '
-        '"we received your application" OR "your application" OR "application status" OR '
-        '"not selected" OR "unfortunately" OR "we regret" OR "moving forward" OR "next steps" OR '
-        'interview OR "phone screen" OR "technical interview" OR schedule OR '
-        'assessment OR "coding challenge" OR offer OR "background check"'
-    )
+    # RULE 2: NO keyword filtering at Gmail query level
+    # Only time-based filtering for incremental sync
+    if last_synced_date:
+        # Fetch only emails newer than last sync (incremental sync)
+        try:
+            # Extract date part from ISO format
+            date_part = last_synced_date.split('T')[0]
+            time_filter = f'after:{date_part}'
+            logger.info(f"[INCREMENTAL] Using incremental sync filter: after {date_part}")
+            query = f'in:anywhere {time_filter}'
+        except:
+            query = f'in:anywhere newer_than:{days}d'
+    else:
+        query = f'in:anywhere newer_than:{days}d'
     
-    # Hard exclusions - exclude obvious noise
-    negative_exclusions = (
-        '-("job alert" OR "jobs you may like" OR "recommended jobs" OR newsletter OR unsubscribe OR '
-        '"career advice" OR webinar OR digest OR promotion OR sale OR coupon)'
-    )
-    
-    # Build strict query
-    query = (
-        f'in:inbox newer_than:{days}d '
-        f'(category:primary OR category:updates) '
-        f'({positive_phrases}) '
-        f'{negative_exclusions} '
-        f'-category:social -category:promotions'
-    )
-    
-    logger.info(f"Built strict Gmail query (days={days}): {query[:200]}...")
+    logger.info(f"[GMAIL QUERY] Built query (NO keyword filtering): {query}")
+    logger.info(f"[GMAIL QUERY] Filtering will happen AFTER fetching full email content")
     
     return query

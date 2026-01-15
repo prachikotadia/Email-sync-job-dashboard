@@ -8,7 +8,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# from app.db.supabase import create_tables # Uncomment to auto-migrate on start
+# Create tables on startup
+from app.db.supabase import create_tables
+create_tables()  # Auto-create tables if they don't exist
 
 app = FastAPI(
     title="Application Service",

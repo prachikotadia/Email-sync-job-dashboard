@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from functools import lru_cache
 from typing import List
 import os
+from pathlib import Path
 
 
 class Settings(BaseSettings):
@@ -28,13 +29,19 @@ class Settings(BaseSettings):
     
     # Database for storing OAuth tokens (use auth-service database or separate)
     # For simplicity, we'll use a shared database or API calls to auth-service
-    DATABASE_URL: str = "sqlite:///./gmail_tokens.db"
+    # Cross-platform path handling
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        f"sqlite:///{Path(__file__).parent.parent.parent / 'gmail_tokens.db'}"
+    )
     
-    # Job Email Filtering Configuration
-    GMAIL_SYNC_DAYS: int = 180  # Days to look back for emails (GMAIL_QUERY_DAYS)
+    # Job Email Filtering Configuration - PRODUCTION GRADE
+    GMAIL_SYNC_DAYS: int = 180  # Days to look back for emails (can extend to years)
     GMAIL_QUERY_DAYS: int = 180  # Days to look back in Gmail query
-    GMAIL_MAX_RESULTS: int = 50  # Maximum emails to fetch per sync
-    CLASSIFIER_MIN_CONFIDENCE: float = 0.85  # Minimum confidence to store (Stage 2)
+    GMAIL_MAX_RESULTS: int = 1200  # HARD LIMIT: Maximum emails to fetch per sync (production-grade)
+    GMAIL_BATCH_SIZE: int = 100  # Batch size for pagination (Gmail API max is 500, but 100 is optimal)
+    CLASSIFIER_MIN_CONFIDENCE: float = 0.5  # Minimum confidence to store (strict classification)
+    CLASSIFIER_MIN_SCORE: int = 4  # Minimum score to accept email
     HEURISTIC_ACCEPT: int = 6  # Minimum score to process email
     HEURISTIC_REJECT: int = 0  # Maximum score to reject email
     LLM_MIN_CONFIDENCE: float = 0.75  # Minimum confidence to store email

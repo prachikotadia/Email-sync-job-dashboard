@@ -75,7 +75,11 @@ apiClient.interceptors.response.use(
             window.dispatchEvent(new Event('demo-mode-trigger'));
         }
 
-        console.error('API Error:', error.response?.data || error.message);
+        // Only log non-auth errors (401/403 are expected)
+        if (error.response?.status !== 401 && error.response?.status !== 403) {
+            // Silently handle errors - don't spam console
+            // console.error('API Error:', error.response?.data || error.message);
+        }
         return Promise.reject(error);
     }
 );

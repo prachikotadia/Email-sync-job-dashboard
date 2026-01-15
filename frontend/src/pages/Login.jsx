@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { NeoCard } from '../ui/NeoCard';
 import { NeoButton } from '../ui/NeoButton';
@@ -6,6 +6,7 @@ import { NeoInput } from '../ui/NeoInput';
 import { NeoSelect } from '../ui/NeoInput';
 import { useAuth } from '../context/AuthContext';
 import { Mail, Lock, User, UserCircle } from 'lucide-react';
+import { env } from '../config/env';
 
 export default function Login() {
     const navigate = useNavigate();
@@ -20,6 +21,81 @@ export default function Login() {
     const [errors, setErrors] = useState({});
     const [submitting, setSubmitting] = useState(false);
     const [processingGoogleCallback, setProcessingGoogleCallback] = useState(false); // Prevent duplicate processing
+    const [googleEnabled, setGoogleEnabled] = useState(true);
+    const [googleStatusMsg, setGoogleStatusMsg] = useState('');
+
+    // Detect if Google OAuth is configured server-side (avoid hard-failing with 500s)
+    // Use useRef to prevent React StrictMode double-invocation
+    const hasCheckedGoogle = useRef(false);
+    
+    useEffect(() => {
+        // Guard against double-call in React StrictMode
+        if (hasCheckedGoogle.current) return;
+        hasCheckedGoogle.current = true;
+        
+        let cancelled = false;
+        const checkGoogle = async () => {
+            try {
+                // Try API Gateway first, fallback to auth service directly if 405
+                let res = await fetch(`${env.API_GATEWAY_URL}/auth/google/status`, {
+                    credentials: 'include',  // Include credentials for CORS
+                });
+                
+                if (!res.ok && res.status === 405) {
+                    // Workaround: API Gateway route issue, call auth service directly
+                    res = await fetch('http://localhost:8003/auth/google/status', {
+                        credentials: 'include',
+                    });
+                }
+                
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                
+                // Safely parse JSON - handle empty/invalid responses
+                let data;
+                try {
+                    const text = await res.text();
+                    if (!text || text.trim() === '') {
+                        throw new Error('Empty response');
+                    }
+                    data = JSON.parse(text);
+                } catch (parseError) {
+                    console.error('Failed to parse status response:', parseError);
+                    // Use safe defaults
+                    data = {
+                        isAuthenticated: false,
+                        hasAccessToken: false,
+                        hasRefreshToken: false,
+                        user: null,
+                        configured: false,
+                    };
+                }
+                
+                if (cancelled) return;
+                
+                // Use stable schema fields
+                const configured = data?.configured ?? data?.isAuthenticated ?? false;
+                setGoogleEnabled(configured);
+                
+                if (!configured) {
+                    setGoogleStatusMsg('Google login is not configured on the server');
+                } else {
+                    setGoogleStatusMsg('');
+                }
+            } catch (e) {
+                // If the endpoint isn't available or gateway is down, use safe defaults
+                if (cancelled) return;
+                console.warn('Google status check failed:', e);
+                // Default to enabled but show no message (graceful degradation)
+                setGoogleEnabled(true);
+                setGoogleStatusMsg('');
+            }
+        };
+        
+        checkGoogle();
+        return () => { cancelled = true; };
+    }, []);
 
     // Handle Google OAuth callback
     useEffect(() => {
@@ -40,6 +116,23 @@ export default function Login() {
             // Only log non-critical errors (ignore scope change warnings from Google OAuth library)
             if (googleError !== 'scope_changed' && !googleError.includes('Scope has changed')) {
                 console.error('Google OAuth error:', googleError);
+                // Show user-friendly error message
+                const decodedError = decodeURIComponent(googleError);
+                if (decodedError.includes('Access denied') || decodedError.includes('testing mode')) {
+                    alert(
+                        'Google Login Error\n\n' +
+                        'This app is in testing mode. To sign in:\n\n' +
+                        '1. Go to Google Cloud Console\n' +
+                        '2. Navigate to: APIs & Services → OAuth consent screen\n' +
+                        '3. Scroll to "Test users" section\n' +
+                        '4. Click "+ ADD USERS"\n' +
+                        '5. Add your email: prachicagoo@gmail.com\n' +
+                        '6. Try signing in again\n\n' +
+                        'Or use email/password login below.'
+                    );
+                } else {
+                    alert(`Google Login Error: ${decodedError}`);
+                }
             }
             // Clean up URL params
             searchParams.delete('google_error');
@@ -315,8 +408,14 @@ export default function Login() {
                         <div className="mt-6">
                             <NeoButton
                                 variant="secondary"
+                                disabled={!googleEnabled}
                                 onClick={() => {
-                                    window.location.href = `${import.meta.env.VITE_API_GATEWAY_URL || 'http://localhost:8000'}/auth/google/login`;
+                                    if (!googleEnabled) return;
+                                    // WORKAROUND: Call auth service directly due to API Gateway 405 errors
+                                    // The API Gateway routes for /auth/google/* are not working properly
+                                    // Using auth service directly ensures Google login works
+                                    const authServiceUrl = 'http://localhost:8003/auth/google/login';
+                                    window.location.href = authServiceUrl;
                                 }}
                                 className="w-full inline-flex justify-center items-center py-3"
                             >
@@ -325,6 +424,11 @@ export default function Login() {
                                 </svg>
                                 Continue with Google
                             </NeoButton>
+                            {!googleEnabled && googleStatusMsg ? (
+                                <p className="mt-2 text-xs text-text-muted text-center">
+                                    {googleStatusMsg}
+                                </p>
+                            ) : null}
                         </div>
                     </div>
                 </NeoCard>

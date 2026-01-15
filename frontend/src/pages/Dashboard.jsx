@@ -44,16 +44,10 @@ const calculateChartData = (applications) => {
         return [];
     }
     
-    // Filter out invalid statuses first
-    const validStatuses = ["Applied", "Interview", "Rejected", "Ghosted", "Accepted/Offer", 
-                           "Screening", "Interview (R1)", "Interview (R2)", "Interview (Final)",
-                           "Offer", "Accepted", "Hired"];
+    // Show ALL applications - don't filter by status
     const validApps = applications.filter(app => {
-        const status = app.status || "";
-        const isValid = validStatuses.includes(status) || 
-                       status.includes("Interview") || 
-                       ["Offer", "Accepted", "Hired"].includes(status);
-        return isValid && status !== "Unknown";
+        // Only filter out null/invalid objects
+        return app && typeof app === 'object';
     });
     
     const statusCounts = {
@@ -123,10 +117,24 @@ export default function Dashboard() {
         return user?.full_name || user?.email || 'User';
     };
 
-    // Empty State Check
+    // ALWAYS show dashboard - don't hide it even if no data
     const metricsList = getMetricsArray(metrics);
-    const hasData = metrics && metrics.total > 0;
+    const hasData = (metrics && metrics.total > 0) || (applications && applications.length > 0);
     const loading = metricsLoading || applicationsLoading;
+    
+    // Debug logging - CRITICAL for troubleshooting
+    useEffect(() => {
+        console.log("📊 Dashboard State:", {
+            applicationsCount: applications?.length || 0,
+            applications: applications,
+            metrics: metrics,
+            loading: loading,
+            hasData: hasData
+        });
+        if (applications && applications.length > 0) {
+            console.log("📊 First 5 applications:", applications.slice(0, 5));
+        }
+    }, [applications, metrics, loading, hasData]);
     
     // Calculate chart data from real applications
     const chartData = calculateChartData(applications);
@@ -134,10 +142,19 @@ export default function Dashboard() {
     const handleSyncComplete = () => {
         setIsSyncing(false);
         setLastSync(new Date().toLocaleTimeString());
-        // Refresh applications after sync
-        refreshApplications();
-        // Clear recent emails after a delay
-        setTimeout(() => setRecentEmails([]), 5000);
+        // Wait for backend to finish storing, then refresh
+        setTimeout(() => {
+            // Refresh applications multiple times to ensure we get the data
+            refreshApplications();
+            setTimeout(() => refreshApplications(), 1000);
+            setTimeout(() => refreshApplications(), 2000);
+            // Dispatch event for Applications page to refresh
+            window.dispatchEvent(new CustomEvent('sync-complete'));
+            // Force full page reload to show all new emails immediately
+            setTimeout(() => {
+                window.location.reload();
+            }, 3000);
+        }, 2000); // Wait 2 seconds for backend to finish processing
     };
     
     const handleEmailAdded = (emailData) => {
@@ -153,8 +170,11 @@ export default function Dashboard() {
 
     if (!hasData && !loading) {
         return (
-            <div className="min-h-[60vh] flex flex-col items-center justify-center p-8">
-                <NeoCard className="flex flex-col items-center text-center max-w-lg w-full py-12 animate-scaleIn">
+            <div className="min-h-[60vh] flex flex-col items-center justify-center p-4 md:p-8 relative">
+                {/* Show SyncProgress even in empty state */}
+                {isSyncing && <SyncProgress onComplete={handleSyncComplete} onClose={() => setIsSyncing(false)} onEmailAdded={handleEmailAdded} />}
+                
+                <NeoCard className="flex flex-col items-center text-center max-w-lg w-full py-8 md:py-12 px-4 md:px-6 animate-scaleIn">
                     <div className="bg-indigo-50 dark:bg-indigo-900/30 p-6 rounded-full mb-6 shadow-neo-pressed">
                         <Rocket className="h-10 w-10 text-indigo-600 dark:text-indigo-400" />
                     </div>
@@ -168,22 +188,32 @@ export default function Dashboard() {
                         }
                     </p>
                     <NeoButton
-                        onClick={() => navigate('/onboarding')}
+                        onClick={() => setIsSyncing(true)}
+                        disabled={isSyncing}
                         className="px-8 py-3 text-lg"
                     >
-                        Get Started <ArrowRight className="ml-2 h-5 w-5 inline" />
+                        {isSyncing ? 'Syncing...' : 'Sync Emails'} <RefreshCcw className={cn("ml-2 h-5 w-5 inline", isSyncing && "animate-spin")} />
                     </NeoButton>
                 </NeoCard>
             </div>
         );
     }
 
+    // Debug: Log applications to console
+    useEffect(() => {
+        console.log("📊 Dashboard - Applications:", applications);
+        console.log("📊 Dashboard - Applications count:", applications?.length);
+        console.log("📊 Dashboard - Metrics:", metrics);
+        console.log("📊 Dashboard - Loading:", loading);
+        console.log("📊 Dashboard - HasData:", hasData);
+    }, [applications, metrics, loading, hasData]);
+
     return (
-        <div className="space-y-8 relative">
+        <div className="space-y-6 md:space-y-8 relative pb-8">
             {isSyncing && <SyncProgress onComplete={handleSyncComplete} onClose={() => setIsSyncing(false)} onEmailAdded={handleEmailAdded} />}
 
-            {/* Header Area in Grid */}
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 px-1 animate-fadeIn">
+            {/* Header Area */}
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 animate-fadeIn">
                 <div>
                     <h1 className="text-3xl font-bold text-text-primary tracking-tight">
                         {greeting}, <span className="text-indigo-600 dark:text-indigo-400">{getUserDisplayName()}</span>
@@ -213,14 +243,14 @@ export default function Dashboard() {
 
             {/* Real-time Email Feed During Sync */}
             {isSyncing && recentEmails.length > 0 && (
-                <NeoCard className="mb-6 animate-slideDown border-2 border-green-200 dark:border-green-800 bg-gradient-to-r from-green-50 to-indigo-50 dark:from-green-900/20 dark:to-indigo-900/20">
+                <NeoCard className="animate-slideDown border-2 border-green-200 dark:border-green-800 bg-gradient-to-r from-green-50 to-indigo-50 dark:from-green-900/20 dark:to-indigo-900/20 mb-6">
                     <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-3">
-                            <div className="p-2 bg-green-500 rounded-lg animate-pulse">
+                            <div className="p-2 bg-green-500 rounded-lg animate-pulse flex-shrink-0">
                                 <CheckCircle className="h-5 w-5 text-white" />
                             </div>
-                            <div>
-                                <h3 className="text-lg font-bold text-text-primary">
+                            <div className="min-w-0">
+                                <h3 className="text-lg font-bold text-text-primary truncate">
                                     Adding Emails Step by Step
                                 </h3>
                                 <p className="text-sm text-text-secondary">
@@ -229,25 +259,23 @@ export default function Dashboard() {
                             </div>
                         </div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                         {recentEmails.slice().reverse().map((email, i) => (
                             <div 
                                 key={email.id || i} 
-                                className="bg-white dark:bg-slate-800 rounded-lg p-4 border-2 border-green-300 dark:border-green-700 shadow-lg animate-scaleIn hover:scale-105 transition-transform"
-                                style={{ animationDelay: `${i * 100}ms` }}
+                                className="bg-white dark:bg-slate-800 rounded-lg p-3 border-2 border-green-300 dark:border-green-700 shadow-lg animate-scaleIn hover:scale-105 transition-transform overflow-hidden"
+                                style={{ animationDelay: `${i * 50}ms` }}
                             >
-                                <div className="flex items-start justify-between">
+                                <div className="flex items-start gap-2">
+                                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse flex-shrink-0 mt-1.5"></div>
                                     <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2 mb-1">
-                                            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                                            <p className="text-sm font-bold text-text-primary truncate">
-                                                {email.company_name || 'New Application'}
-                                            </p>
-                                        </div>
-                                        <p className="text-xs text-text-secondary truncate mb-1">
+                                        <p className="text-sm font-bold text-text-primary truncate mb-1">
+                                            {email.company_name || 'New Application'}
+                                        </p>
+                                        <p className="text-xs text-text-secondary truncate mb-2">
                                             {email.role || 'Job Application'}
                                         </p>
-                                        <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300">
+                                        <span className="inline-block px-2 py-0.5 text-xs font-semibold rounded-md bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300">
                                             {email.status || 'Applied'}
                                         </span>
                                     </div>
@@ -259,48 +287,53 @@ export default function Dashboard() {
             )}
 
             {/* 12-Column Grid Layout */}
-            <div className="grid grid-cols-12 gap-6">
+            <div className="grid grid-cols-12 gap-4 md:gap-6">
 
                 {/* Row 1: KPI Cards - Staggered Animation */}
                 {metricsList.map((stat, index) => (
                     <div
                         key={index}
-                        className="col-span-12 sm:col-span-6 lg:col-span-3 animate-slideUp"
+                        className="col-span-12 sm:col-span-6 lg:col-span-3 animate-slideUp mb-4 md:mb-0"
                         style={{ animationDelay: `${index * 100}ms` }}
                     >
-                        <NeoCard className="flex items-center space-x-4 h-full hover:shadow-lg hover:-translate-y-1 transition-all duration-300 cursor-default group">
-                            <div className={cn("p-4 rounded-xl flex-shrink-0 shadow-neo-pressed transition-transform group-hover:scale-110 duration-300", stat.bg)}>
-                                <stat.icon className={cn("h-6 w-6", stat.color)} />
+                        <NeoCard className="flex items-center space-x-3 md:space-x-4 h-full hover:shadow-lg hover:-translate-y-1 transition-all duration-300 cursor-default group p-4 md:p-6">
+                            <div className={cn("p-3 md:p-4 rounded-xl flex-shrink-0 shadow-neo-pressed transition-transform group-hover:scale-110 duration-300", stat.bg)}>
+                                <stat.icon className={cn("h-5 w-5 md:h-6 md:w-6", stat.color)} />
                             </div>
-                            <div>
-                                <p className="text-xs font-bold text-text-secondary uppercase tracking-wide">{stat.title}</p>
-                                <p className="text-2xl font-bold text-text-primary mt-1">
-                                    {loading ? "..." : stat.value}
+                            <div className="min-w-0 flex-1">
+                                <p className="text-xs font-bold text-text-secondary uppercase tracking-wide truncate">{stat.title}</p>
+                                <p className="text-xl md:text-2xl font-bold text-text-primary mt-1">
+                                    {loading ? "..." : (stat.value ?? 0)}
+                                    {stat.title === 'Total Applications' && metrics?.total_emails && metrics.total_emails > (stat.value ?? 0) && (
+                                        <span className="ml-2 text-sm font-normal text-text-secondary">
+                                            ({metrics.total_emails} emails)
+                                        </span>
+                                    )}
                                 </p>
                             </div>
                         </NeoCard>
                     </div>
                 ))}
 
-                {/* Row 2: Status Chart */}
-                <div className="col-span-12 lg:col-span-8 animate-slideUp" style={{ animationDelay: '400ms' }}>
-                    <NeoCard className="h-[400px] flex flex-col">
-                        <div className="flex justify-between items-center mb-6">
+                {/* Row 2: Status Chart and Profile - Clear Row Separation */}
+                <div className="col-span-12 lg:col-span-8 animate-slideUp mb-4 md:mb-0" style={{ animationDelay: '400ms' }}>
+                    <NeoCard className="flex flex-col p-4 md:p-6 w-full">
+                        <div className="flex justify-between items-center mb-4 md:mb-6">
                             <div>
-                                <h3 className="text-lg font-bold text-text-primary">Application Overview</h3>
-                                <p className="text-xs text-text-muted">Current status distribution</p>
+                                <h3 className="text-base md:text-lg font-bold text-text-primary">Application Overview</h3>
+                                <p className="text-xs text-text-muted mt-0.5">Current status distribution</p>
                             </div>
                         </div>
-                        <div className="flex-1 w-full" style={{ height: '340px', minHeight: '300px', width: '100%', position: 'relative' }}>
+                        <div className="w-full overflow-hidden" style={{ height: '280px', minHeight: '280px' }}>
                             {chartData.length === 0 ? (
                                 <div className="flex items-center justify-center h-full text-text-secondary">
                                     <p>No data available</p>
                                 </div>
                             ) : (
-                            <ResponsiveContainer width="100%" height={340}>
+                            <ResponsiveContainer width="100%" height="100%">
                                 <BarChart
                                     data={chartData}
-                                    margin={{ top: 20, right: 30, left: 0, bottom: 0 }}
+                                    margin={{ top: 20, right: 30, left: 20, bottom: 20 }}
                                     onMouseMove={(state) => {
                                         if (state.isTooltipActive) {
                                             setActiveIndex(state.activeTooltipIndex);
@@ -334,18 +367,25 @@ export default function Dashboard() {
                                     />
                                     <Tooltip
                                         cursor={{ fill: 'var(--bg-surface)', opacity: 0.5, radius: [8, 8, 0, 0] }}
+                                        contentStyle={{ 
+                                            backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                                            border: '1px solid rgba(0, 0, 0, 0.1)',
+                                            borderRadius: '12px',
+                                            padding: '12px',
+                                            zIndex: 1000
+                                        }}
                                         content={({ active, payload, label }) => {
                                             if (active && payload && payload.length) {
                                                 const data = payload[0];
                                                 return (
-                                                    <div className="bg-white/90 dark:bg-black/80 backdrop-blur-md border border-white/50 dark:border-white/10 p-4 rounded-2xl shadow-neo-button">
+                                                    <div className="bg-white/95 dark:bg-slate-800/95 backdrop-blur-md border border-slate-200 dark:border-slate-700 p-3 rounded-xl shadow-lg z-[1000]">
                                                         <p className="text-sm font-bold text-text-secondary mb-1">{label}</p>
                                                         <div className="flex items-center space-x-2">
                                                             <div
-                                                                className="w-3 h-3 rounded-full"
+                                                                className="w-3 h-3 rounded-full flex-shrink-0"
                                                                 style={{ backgroundColor: COLORS[chartData.findIndex(d => d.name === label) % COLORS.length] }}
                                                             />
-                                                            <p className="text-xl font-bold text-text-primary">
+                                                            <p className="text-lg font-bold text-text-primary">
                                                                 {data.value}
                                                                 <span className="text-xs font-normal text-text-muted ml-1">apps</span>
                                                             </p>
@@ -359,7 +399,7 @@ export default function Dashboard() {
                                     <Bar
                                         dataKey="value"
                                         radius={[8, 8, 8, 8]}
-                                        barSize={45}
+                                        barSize={40}
                                         animationDuration={1500}
                                     >
                                         {chartData.map((entry, index) => (
@@ -382,19 +422,19 @@ export default function Dashboard() {
                     </NeoCard>
                 </div>
 
-                <div className="col-span-12 lg:col-span-4 flex flex-col gap-6 animate-slideUp" style={{ animationDelay: '500ms' }}>
+                <div className="col-span-12 lg:col-span-4 flex flex-col gap-4 md:gap-6 animate-slideUp mb-4 md:mb-0" style={{ animationDelay: '500ms' }}>
                     {/* User Profile Widget */}
                     {user && (
-                        <NeoCard className="p-6 bg-gradient-to-br from-indigo-50 to-indigo-100 dark:from-indigo-900/20 dark:to-indigo-800/20 border-indigo-200 dark:border-indigo-800/50">
-                            <div className="flex items-center space-x-4">
-                                <div className="h-14 w-14 rounded-xl bg-indigo-600 dark:bg-indigo-500 flex items-center justify-center text-white font-bold text-xl shadow-neo-button flex-shrink-0">
+                        <NeoCard className="p-4 md:p-6 bg-gradient-to-br from-indigo-50 to-indigo-100 dark:from-indigo-900/20 dark:to-indigo-800/20 border-indigo-200 dark:border-indigo-800/50 w-full">
+                            <div className="flex items-center space-x-3 md:space-x-4">
+                                <div className="h-12 w-12 md:h-14 md:w-14 rounded-xl bg-indigo-600 dark:bg-indigo-500 flex items-center justify-center text-white font-bold text-lg md:text-xl shadow-neo-button flex-shrink-0">
                                     {(user.full_name || user.email)?.charAt(0).toUpperCase() || 'U'}
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <p className="text-sm font-bold text-indigo-900 dark:text-indigo-200 truncate">
                                         {user.full_name || 'User'}
                                     </p>
-                                    <p className="text-xs text-indigo-700 dark:text-indigo-300 truncate">
+                                    <p className="text-xs text-indigo-700 dark:text-indigo-300 truncate mt-0.5">
                                         {user.email}
                                     </p>
                                     <p className="text-xs text-indigo-600 dark:text-indigo-400 mt-1">
@@ -407,40 +447,42 @@ export default function Dashboard() {
                 </div>
 
                 {/* Bottom Row: Recent Activity Timeline */}
-                <div className="col-span-12 animate-slideUp" style={{ animationDelay: '600ms' }}>
-                    <NeoCard>
-                        <div className="flex items-center justify-between mb-6">
-                            <h3 className="text-lg font-bold text-text-primary">
+                <div className="col-span-12 animate-slideUp mt-4 md:mt-0" style={{ animationDelay: '600ms' }}>
+                    <NeoCard className="p-4 md:p-6 w-full">
+                        <div className="flex items-center justify-between mb-4 md:mb-6 flex-wrap gap-2">
+                            <h3 className="text-base md:text-lg font-bold text-text-primary">
                                 Recent Activity
                                 {isSyncing && recentEmails.length > 0 && (
-                                    <span className="ml-2 text-sm font-normal text-indigo-600 dark:text-indigo-400 animate-pulse">
+                                    <span className="ml-2 text-xs md:text-sm font-normal text-indigo-600 dark:text-indigo-400 animate-pulse">
                                         • Adding {recentEmails.length} email{recentEmails.length !== 1 ? 's' : ''}...
                                     </span>
                                 )}
                             </h3>
-                            <NeoButton variant="ghost" size="sm" onClick={() => navigate('/applications')}>
+                            <NeoButton variant="ghost" size="sm" onClick={() => navigate('/applications')} className="flex-shrink-0">
                                 View All
                             </NeoButton>
                         </div>
-                        <div className="relative pl-4 space-y-6 before:absolute before:inset-y-0 before:left-[19px] before:w-0.5 before:bg-slate-200 dark:before:bg-white/10">
+                        <div className="relative pl-4 md:pl-6 space-y-3 md:space-y-4 max-h-[600px] overflow-y-auto overflow-x-hidden pr-2 md:pr-4">
+                            {/* Timeline line - positioned to not overlap */}
+                            <div className="absolute left-[15px] md:left-[23px] top-0 bottom-0 w-0.5 bg-slate-200 dark:bg-white/10 z-0"></div>
                             {/* Show recently added emails first during sync */}
                             {isSyncing && recentEmails.length > 0 && (
                                 <>
                                     {recentEmails.slice().reverse().map((email, i) => (
-                                        <div key={email.id || i} className="relative pl-8 group animate-slideInRight" style={{ animationDelay: `${i * 100}ms` }}>
-                                            <div className="absolute left-0 top-1 p-1.5 rounded-full border-2 border-white dark:border-app shadow-sm bg-green-100 dark:bg-green-900/30 text-green-500 animate-pulse">
-                                                <CheckCircle className="h-3 w-3" />
+                                        <div key={email.id || i} className="relative pl-8 md:pl-10 group animate-slideInRight z-10" style={{ animationDelay: `${i * 50}ms` }}>
+                                            <div className="absolute left-0 top-1.5 p-1.5 md:p-2 rounded-full border-2 border-white dark:border-app shadow-md bg-green-100 dark:bg-green-900/30 text-green-500 animate-pulse z-20">
+                                                <CheckCircle className="h-2.5 w-2.5 md:h-3 md:w-3" />
                                             </div>
-                                            <div className="flex items-center justify-between p-3 rounded-xl bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800 hover:bg-green-100 dark:hover:bg-green-900/20 transition-all">
-                                                <div>
-                                                    <p className="text-sm font-bold text-text-primary">
+                                            <div className="flex items-center justify-between p-2.5 md:p-3 rounded-xl bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800 hover:bg-green-100 dark:hover:bg-green-900/20 transition-all gap-2 ml-1">
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-xs md:text-sm font-bold text-text-primary truncate">
                                                         {email.company_name || 'New Application'}
                                                         <span className="ml-2 text-xs font-normal text-green-600 dark:text-green-400">NEW</span>
                                                     </p>
-                                                    <p className="text-xs text-text-secondary">{email.role || 'Job Application'}</p>
+                                                    <p className="text-xs text-text-secondary truncate mt-0.5">{email.role || 'Job Application'}</p>
                                                     <p className="text-xs text-green-600 dark:text-green-400 mt-1">{email.status || 'Applied'}</p>
                                                 </div>
-                                                <span className="text-xs text-text-muted font-medium flex items-center">
+                                                <span className="text-xs text-text-muted font-medium flex items-center flex-shrink-0">
                                                     <Clock className="h-3 w-3 mr-1" />
                                                     Just now
                                                 </span>
@@ -449,20 +491,21 @@ export default function Dashboard() {
                                     ))}
                                 </>
                             )}
-                            {applications && applications.length > 0 ? (
-                                // Filter out invalid statuses before displaying
+                            {/* ALWAYS SHOW ALL APPLICATIONS - NO FILTERING */}
+                            {loading ? (
+                                <div className="text-center py-8 text-text-secondary">
+                                    <p>Loading applications...</p>
+                                </div>
+                            ) : applications && applications.length > 0 ? (
+                                // Show ALL applications - sorted by most recent first - NO LIMIT
                                 applications
-                                    .filter(app => {
-                                        const status = app.status || "";
-                                        const validStatuses = ["Applied", "Interview", "Rejected", "Ghosted", "Accepted/Offer", 
-                                                             "Screening", "Interview (R1)", "Interview (R2)", "Interview (Final)",
-                                                             "Offer", "Accepted", "Hired"];
-                                        const isValid = validStatuses.includes(status) || 
-                                                       status.includes("Interview") || 
-                                                       ["Offer", "Accepted", "Hired"].includes(status);
-                                        return isValid && status !== "Unknown";
+                                    .sort((a, b) => {
+                                        // Sort by last_email_date or created_at, most recent first
+                                        const dateA = new Date(a.last_email_date || a.created_at || a.updated_at || 0);
+                                        const dateB = new Date(b.last_email_date || b.created_at || b.updated_at || 0);
+                                        return dateB - dateA;
                                     })
-                                    .slice(0, 5)
+                                    // REMOVED .slice(0, 10) - SHOW ALL APPLICATIONS
                                     .map((app, i) => {
                                     // Determine icon and color based on status
                                     let icon = FileText;
@@ -473,6 +516,10 @@ export default function Dashboard() {
                                         icon = Calendar;
                                         color = 'text-amber-500';
                                         bg = 'bg-amber-100 dark:bg-amber-900/30';
+                                    } else if (app.status === 'Rejected') {
+                                        icon = FileText;
+                                        color = 'text-red-500';
+                                        bg = 'bg-red-100 dark:bg-red-900/30';
                                     } else if (app.status === 'Offer' || app.status === 'Accepted' || app.status === 'Hired' || app.status === 'Accepted/Offer') {
                                         icon = CheckCircle;
                                         color = 'text-emerald-500';
@@ -485,19 +532,19 @@ export default function Dashboard() {
                                         : 'Unknown';
                                     
                                     return (
-                                        <div key={app.id || i} className="relative pl-8 group">
+                                        <div key={app.id || i} className="relative pl-8 md:pl-10 group z-10">
                                             <div className={cn(
-                                                "absolute left-0 top-1 p-1.5 rounded-full border-2 border-white dark:border-app shadow-sm transition-transform group-hover:scale-110",
+                                                "absolute left-0 top-1.5 p-1.5 md:p-2 rounded-full border-2 border-white dark:border-app shadow-md transition-transform group-hover:scale-110 z-20",
                                                 bg, color
                                             )}>
-                                                {React.createElement(icon, { className: "h-3 w-3" })}
+                                                {React.createElement(icon, { className: "h-2.5 w-2.5 md:h-3 md:w-3" })}
                                             </div>
-                                            <div className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/5 transition-colors cursor-pointer border border-transparent hover:border-slate-100 dark:hover:border-white/5">
-                                                <div>
-                                                    <p className="text-sm font-bold text-text-primary">{app.company_name}</p>
-                                                    <p className="text-xs text-text-secondary">{app.status || 'Applied'}</p>
+                                            <div className="flex items-center justify-between p-2.5 md:p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/5 transition-colors cursor-pointer border border-transparent hover:border-slate-100 dark:hover:border-white/5 gap-2 ml-1">
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-xs md:text-sm font-bold text-text-primary truncate">{app.company_name}</p>
+                                                    <p className="text-xs text-text-secondary truncate mt-0.5">{app.status || 'Applied'}</p>
                                                 </div>
-                                                <span className="text-xs text-text-muted font-medium flex items-center">
+                                                <span className="text-xs text-text-muted font-medium flex items-center flex-shrink-0">
                                                     <Clock className="h-3 w-3 mr-1" />
                                                     {timeAgo}
                                                 </span>

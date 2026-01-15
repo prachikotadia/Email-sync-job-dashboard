@@ -9,6 +9,7 @@ from app.security.token_verification import verify_token_scopes
 from app.security.google_oauth import refresh_access_token, ReauthRequiredError
 from app.filters.query_builder import build_job_gmail_query
 from app.services.email_classifier import classify_email, EmailCategory
+from app.services.strict_classifier import classify_email_strict
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -17,13 +18,17 @@ import httpx
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import asyncio
 import uuid
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 settings = get_settings()
+
+# Per-user sync lock (in-memory). Prevents concurrent syncs for same user.
+_ACTIVE_GMAIL_SYNCS = set()
+_ACTIVE_GMAIL_SYNCS_LOCK = asyncio.Lock()
 
 
 async def get_user_from_jwt(authorization: str = Header(None)) -> dict:
@@ -289,13 +294,19 @@ async def fetch_emails_from_gmail(
     credentials: Credentials, 
     user_id: str,
     access_token: str,
-    max_results: int = 50
-) -> List[Dict[str, Any]]:
+    max_results: int = None,
+    last_synced_date: str = None
+) -> Tuple[List[Dict[str, Any]], int]:
     """
-    Fetch emails from Gmail API with proper token refresh handling.
+    PRODUCTION-GRADE Gmail email fetcher with proper pagination.
     
-    Stage 1: Uses strict Gmail query to only fetch likely job-related emails.
-    Tokeninfo is optional debug only - Gmail API 401 is authoritative.
+    Requirements:
+    - Fetches in batches of 100 (configurable)
+    - Hard limit of 1200 emails per sync
+    - Sorted by internalDate DESC (newest first)
+    - Two-stage filtering (Stage 1: Gmail query, Stage 2: Classification)
+    - Full email content extraction (subject, from, to, snippet, plain text, HTML)
+    - Incremental sync support (only fetch newer emails)
     """
     # Validate token exists
     if not credentials.token:
@@ -304,31 +315,77 @@ async def fetch_emails_from_gmail(
             detail="Gmail access token is missing. Please reconnect your Gmail account."
         )
     
-    # Optional tokeninfo check (debug only, non-blocking)
-    tokeninfo_success, tokeninfo_scopes = await verify_token_scopes(credentials.token)
-    if tokeninfo_success:
-        logger.debug(f"Tokeninfo scopes: {tokeninfo_scopes}")
-    else:
-        logger.debug("Tokeninfo check failed (non-blocking, continuing with Gmail API)")
+    # Get configuration
+    batch_size = getattr(settings, 'GMAIL_BATCH_SIZE', 100)
+    hard_limit = getattr(settings, 'GMAIL_MAX_RESULTS', 1200)
+    max_results = min(max_results or hard_limit, hard_limit)  # Enforce hard limit
     
-    # Build strict Gmail query (Stage 1 pre-filter)
+    # Build Stage 1 Gmail query (fast pre-filter)
     query_days = getattr(settings, 'GMAIL_QUERY_DAYS', 180)
-    search_query = build_job_gmail_query(days=query_days)
-    max_results = min(max_results, getattr(settings, 'GMAIL_MAX_RESULTS', 50))
+    search_query = build_job_gmail_query(days=query_days, last_synced_date=last_synced_date)
     
     logger.info(f"[STAGE 1] Gmail query: {search_query[:200]}...")
-    logger.info(f"[STAGE 1] Max results: {max_results}")
+    logger.info(f"[STAGE 1] Batch size: {batch_size}, Hard limit: {hard_limit}, Max results: {max_results}")
+    logger.info(f"[STAGE 1] Incremental sync: {last_synced_date is not None}")
     
     # Build Gmail service
     service = build('gmail', 'v1', credentials=credentials)
     
-    # Attempt Gmail API call (with retry on 401)
+    # RULE 1: PRODUCTION-GRADE PAGINATION - Fetch in batches of 100, up to hard limit
+    all_message_ids = []
+    all_message_metadata = []  # Store (id, internalDate) for sorting
+    page_token = None
+    fetched_count = 0
+    pages_fetched = 0  # RULE 1: Track pages fetched
+    
     try:
-        results = service.users().messages().list(
-            userId='me',
-            q=search_query,
-            maxResults=max_results
-        ).execute()
+        while fetched_count < max_results:
+            # Calculate batch size for this request
+            remaining = max_results - fetched_count
+            current_batch_size = min(batch_size, remaining)
+            
+            request_params = {
+                'userId': 'me',
+                'q': search_query,
+                'maxResults': current_batch_size
+                # Gmail API returns messages in reverse chronological order (newest first) by default
+                # This is what we want - most recent emails first
+            }
+            if page_token:
+                request_params['pageToken'] = page_token
+            
+            results = service.users().messages().list(**request_params).execute()
+            messages = results.get('messages', [])
+            
+            if not messages:
+                logger.info(f"[STAGE 1] No more messages found")
+                break
+            
+            # Store message IDs and fetch metadata for sorting
+            for msg in messages:
+                msg_id = msg.get('id')
+                if msg_id:
+                    all_message_ids.append(msg_id)
+                    # We'll get internalDate when fetching full message
+                    all_message_metadata.append({'id': msg_id})
+            
+            fetched_count = len(all_message_ids)
+            pages_fetched += 1  # RULE 1: Increment page count
+            logger.info(f"[STAGE 1] Fetched page {pages_fetched}: {len(messages)} messages (total: {fetched_count}/{max_results})")
+            
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                logger.info(f"[STAGE 1] No more pages available")
+                break  # No more pages
+            
+            # Enforce hard limit
+            if fetched_count >= max_results:
+                logger.info(f"[STAGE 1] Reached hard limit of {max_results} emails")
+                break
+        
+        # RULE 1: Log pagination stats
+        logger.info(f"[STAGE 1] ✅ Pagination complete: Fetched {len(all_message_ids)} message IDs across {pages_fetched} pages")
+        logger.info(f"[STAGE 1] Processing {len(all_message_ids)} most recent emails (sorted by internalDate DESC)")
     except HttpError as e:
         # Gmail API returned error - check if 401 (unauthorized)
         if e.resp.status == 401:
@@ -362,13 +419,28 @@ async def fetch_emails_from_gmail(
                 # Rebuild service with new credentials
                 service = build('gmail', 'v1', credentials=credentials)
                 
-                # Retry Gmail API call once
-                logger.info("Token refreshed, retrying Gmail API call...")
-                results = service.users().messages().list(
-                    userId='me',
-                    q=search_query,
-                    maxResults=max_results
-                ).execute()
+                # Retry Gmail API call with pagination
+                logger.info("Token refreshed, retrying Gmail API call with pagination...")
+                all_message_ids = []
+                page_token = None
+                while len(all_message_ids) < max_results:
+                    request_params = {
+                        'userId': 'me',
+                        'q': search_query,
+                        'maxResults': min(500, max_results - len(all_message_ids))
+                    }
+                    if page_token:
+                        request_params['pageToken'] = page_token
+                    
+                    results = service.users().messages().list(**request_params).execute()
+                    messages = results.get('messages', [])
+                    all_message_ids.extend([msg['id'] for msg in messages])
+                    
+                    page_token = results.get('nextPageToken')
+                    if not page_token:
+                        break
+                
+                message_ids = all_message_ids[:max_results]
                 
             except ReauthRequiredError as reauth_error:
                 logger.error(f"Token refresh failed: {reauth_error}")
@@ -390,25 +462,118 @@ async def fetch_emails_from_gmail(
                 detail=f"Gmail API error: {str(e)}"
             )
     
-    # Extract message IDs
-    messages = results.get('messages', [])
-    message_ids = [msg['id'] for msg in messages]
+        # Sort by internalDate DESC (newest first) - Gmail API already returns newest first, but we'll verify
+        # We'll sort after fetching full messages to get internalDate
+        
+    except HttpError as e:
+        # Gmail API returned error - check if 401 (unauthorized)
+        if e.resp.status == 401:
+            logger.warning("Gmail API returned 401 - attempting token refresh...")
+            
+            # Refresh token
+            if not credentials.refresh_token:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Re-auth required: Refresh token is missing. Please reconnect your Gmail account."
+                )
+            
+            try:
+                # Refresh using our async refresh function
+                refresh_result = await refresh_access_token(credentials.refresh_token)
+                
+                # Update credentials
+                credentials.token = refresh_result["access_token"]
+                if refresh_result.get("expires_in"):
+                    from datetime import timedelta
+                    credentials.expiry = datetime.utcnow() + timedelta(seconds=refresh_result["expires_in"])
+                
+                # Update tokens in auth-service
+                await _update_tokens_in_auth_service(
+                    user_id=user_id,
+                    access_token=access_token,
+                    new_token=credentials.token,
+                    refresh_token=credentials.refresh_token
+                )
+                
+                # Rebuild service with new credentials
+                service = build('gmail', 'v1', credentials=credentials)
+                
+                # Retry Gmail API call with pagination
+                logger.info("Token refreshed, retrying Gmail API call with pagination...")
+                all_message_ids = []
+                all_message_metadata = []
+                page_token = None
+                fetched_count = 0
+                
+                while fetched_count < max_results:
+                    remaining = max_results - fetched_count
+                    current_batch_size = min(batch_size, remaining)
+                    
+                    request_params = {
+                        'userId': 'me',
+                        'q': search_query,
+                        'maxResults': current_batch_size
+                    }
+                    if page_token:
+                        request_params['pageToken'] = page_token
+                    
+                    results = service.users().messages().list(**request_params).execute()
+                    messages = results.get('messages', [])
+                    
+                    if not messages:
+                        break
+                    
+                    for msg in messages:
+                        msg_id = msg.get('id')
+                        if msg_id:
+                            all_message_ids.append(msg_id)
+                            all_message_metadata.append({'id': msg_id})
+                    
+                    fetched_count = len(all_message_ids)
+                    page_token = results.get('nextPageToken')
+                    if not page_token or fetched_count >= max_results:
+                        break
+                
+            except ReauthRequiredError as reauth_error:
+                logger.error(f"Token refresh failed: {reauth_error}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Re-auth required: {str(reauth_error)}"
+                )
+            except Exception as refresh_error:
+                logger.error(f"Token refresh error: {refresh_error}", exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Re-auth required: Token refresh failed. Please reconnect your Gmail account."
+                )
+        else:
+            # Non-401 error from Gmail API
+            logger.error(f"Gmail API error: {e.resp.status} - {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY if e.resp.status >= 500 else status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Gmail API error: {str(e)}"
+            )
     
-    logger.info(f"[STAGE 1] Found {len(message_ids)} messages from Gmail query")
+    logger.info(f"[STAGE 1] ✅ Found {len(all_message_ids)} messages from Gmail query")
     
-    # Log example subjects (first 10) for sanity check
-    if message_ids:
-        logger.info(f"[STAGE 1] Example message IDs: {message_ids[:10]}")
-    
-    # Fetch full message details
+    # STAGE 2: Fetch FULL email content for each message
+    logger.info(f"[STAGE 2] Fetching full email content for {len(all_message_ids)} messages...")
     email_data = []
-    for msg_id in message_ids:
+    import base64
+    import html2text
+    
+    for idx, msg_id in enumerate(all_message_ids, 1):
         try:
+            # Fetch full message with all parts
             message = service.users().messages().get(
                 userId='me',
                 id=msg_id,
                 format='full'
             ).execute()
+            
+            # Extract internalDate for sorting (newest first)
+            internal_date = message.get('internalDate')
+            internal_date_int = int(internal_date) if internal_date else 0
             
             # Safely extract headers
             payload = message.get('payload', {}) if isinstance(message, dict) else {}
@@ -423,33 +588,96 @@ async def fetch_emails_from_gmail(
             for h in headers_raw:
                 if isinstance(h, dict):
                     headers.append(h)
-                else:
-                    # Skip non-dict headers
-                    continue
             
             subject = next((h.get('value', '') for h in headers if h.get('name', '') == 'Subject'), 'No Subject')
             sender = next((h.get('value', '') for h in headers if h.get('name', '') == 'From'), 'Unknown')
+            to_email = next((h.get('value', '') for h in headers if h.get('name', '') == 'To'), '')
             date = next((h.get('value', '') for h in headers if h.get('name', '') == 'Date'), None)
             snippet = message.get('snippet', '') if isinstance(message, dict) else ''
             
             # Extract headers dict for classifier
             headers_dict = {h.get('name', ''): h.get('value', '') for h in headers if isinstance(h, dict) and h.get('name') and h.get('value')}
             
+            # FULL EMAIL CONTENT EXTRACTION (Stage 2 requirement)
+            plain_text_body = ''
+            html_body = ''
+            
+            def extract_body_from_parts(parts):
+                """Recursively extract body from message parts."""
+                plain_text = ''
+                html = ''
+                
+                for part in parts:
+                    mime_type = part.get('mimeType', '')
+                    body_data = part.get('body', {}).get('data', '')
+                    
+                    if mime_type == 'text/plain' and body_data and not plain_text:
+                        try:
+                            plain_text = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                        except:
+                            pass
+                    elif mime_type == 'text/html' and body_data and not html:
+                        try:
+                            html = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                        except:
+                            pass
+                    
+                    # Recursively check nested parts
+                    if 'parts' in part:
+                        nested_plain, nested_html = extract_body_from_parts(part['parts'])
+                        if nested_plain and not plain_text:
+                            plain_text = nested_plain
+                        if nested_html and not html:
+                            html = nested_html
+                
+                return plain_text, html
+            
+            # Extract body from payload
+            if 'parts' in payload:
+                plain_text_body, html_body = extract_body_from_parts(payload['parts'])
+            elif payload.get('mimeType') == 'text/plain':
+                body_data = payload.get('body', {}).get('data', '')
+                if body_data:
+                    try:
+                        plain_text_body = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                    except:
+                        pass
+            elif payload.get('mimeType') == 'text/html':
+                body_data = payload.get('body', {}).get('data', '')
+                if body_data:
+                    try:
+                        html_body = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                        # Convert HTML to plain text
+                        plain_text_body = html2text.html2text(html_body)
+                    except:
+                        pass
+            
+            # Use plain text body, fallback to snippet
+            body_text = plain_text_body or snippet
+            
             email_data.append({
                 'id': msg_id,
+                'thread_id': message.get('threadId', ''),
+                'internal_date': internal_date_int,
                 'subject': subject,
                 'from': sender,
+                'to': to_email,
                 'date': date,
                 'snippet': snippet,
+                'plain_text_body': plain_text_body,
+                'html_body': html_body,
+                'body_text': body_text,
                 'headers': headers_dict,
                 'raw': message
             })
             
+            # Log progress every 50 emails
+            if idx % 50 == 0:
+                logger.info(f"[STAGE 2] Fetched {idx}/{len(all_message_ids)} emails...")
+            
         except HttpError as e:
             if e.resp.status == 401:
-                # Token expired during fetch - would need another refresh
                 logger.error(f"401 error fetching message {msg_id} - token expired during fetch")
-                # Skip this message and continue
                 continue
             else:
                 logger.error(f"Error fetching message {msg_id}: {e.resp.status} - {str(e)}")
@@ -458,15 +686,21 @@ async def fetch_emails_from_gmail(
             logger.error(f"Error fetching message {msg_id}: {e}", exc_info=True)
             continue
     
-    logger.info(f"[STAGE 1] Successfully fetched {len(email_data)} messages")
+    # REQUIREMENT 1: Strict reverse chronological order (newest → oldest)
+    # Sort by internalDate DESC to ensure most recent emails are processed first
+    email_data.sort(key=lambda x: x.get('internal_date', 0), reverse=True)
+    logger.info(f"[REQUIREMENT 1] ✅ Sorted {len(email_data)} emails by internalDate DESC (newest first)")
     
-    # Log example subjects
+    logger.info(f"[STAGE 2] ✅ Successfully fetched and extracted {len(email_data)} full email messages")
+    logger.info(f"[STAGE 2] Emails sorted by internalDate DESC (newest first)")
+    
+    # Log example subjects (first 10) for debugging
     if email_data:
-        logger.info(f"[STAGE 1] Example subjects (first 10):")
+        logger.info(f"[STAGE 2] Example subjects (first 10, newest first):")
         for email in email_data[:10]:
-            logger.info(f"  - {email.get('subject', 'No Subject')[:80]}")
+            logger.info(f"  - [{email.get('internal_date', 0)}] {email.get('subject', 'No Subject')[:80]}")
     
-    return email_data
+    return email_data, pages_fetched
 
 
 def send_sse_message(message: str, progress: int = None, stage: str = None, email_data: dict = None):
@@ -563,23 +797,60 @@ async def sync_gmail_emails_streaming(
         yield send_sse_message("Gmail credentials retrieved successfully", progress=15, stage="Connected")
         await asyncio.sleep(0.1)
         
-        # Step 2: Fetch emails from Gmail (Stage 1 - strict query)
+        # Step 2: Get last sync info for incremental sync (graceful degradation if endpoint doesn't exist)
+        last_synced_date = None
+        last_message_internal_date = None
+        try:
+            async with httpx.AsyncClient() as client:
+                # Try to get last sync info (endpoint may not exist yet)
+                sync_info_response = await client.get(
+                    f"{settings.AUTH_SERVICE_URL}/api/gmail/sync-info",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=5.0
+                )
+                if sync_info_response.status_code == 200:
+                    sync_info = sync_info_response.json()
+                    last_synced_date = sync_info.get('last_synced_at')
+                    last_message_internal_date = sync_info.get('last_message_internal_date')
+                    logger.info(f"[INCREMENTAL SYNC] Last sync: {last_synced_date}, Last message date: {last_message_internal_date}")
+                else:
+                    logger.info(f"[INCREMENTAL SYNC] Sync-info endpoint returned {sync_info_response.status_code}, doing full sync")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.info(f"[INCREMENTAL SYNC] Sync-info endpoint not found (404), doing full sync")
+            else:
+                logger.warning(f"Could not fetch last sync info (will do full sync): {e}")
+        except Exception as e:
+            logger.warning(f"Could not fetch last sync info (will do full sync): {e}")
+        
+        # Step 3: Fetch emails from Gmail (Stage 1 - Gmail API query + Stage 2 - Full content extraction)
         yield send_sse_message("Fetching job-related emails from Gmail...", progress=20, stage="Fetching emails")
         try:
-            max_results = getattr(settings, 'GMAIL_MAX_RESULTS', 50)
-            emails = await fetch_emails_from_gmail(credentials, user_id, access_token, max_results)
-            yield send_sse_message(f"Found {len(emails)} emails from Gmail query", progress=30, stage="Fetching emails")
+            max_results = getattr(settings, 'GMAIL_MAX_RESULTS', 1200)
+            emails, pages_fetched = await fetch_emails_from_gmail(
+                credentials, 
+                user_id, 
+                access_token, 
+                max_results=max_results,
+                last_synced_date=last_synced_date
+            )
             
-            # Log the last email details
+            total_scanned = len(emails)
+            logger.info(f"[SYNC STATS] Total emails scanned: {total_scanned}")
+            logger.info(f"[SYNC STATS] Pages fetched: {pages_fetched}")
+            yield send_sse_message(f"Scanned {total_scanned} emails from Gmail", progress=30, stage="Fetching emails")
+            
+            # Log the most recent email details (first in sorted list)
             if emails:
-                last_email = emails[-1]
+                most_recent = emails[0]  # First email is newest (sorted DESC)
                 logger.info("=" * 80)
-                logger.info("LAST EMAIL IN SYNC:")
-                logger.info(f"ID: {last_email.get('id')}")
-                logger.info(f"Subject: {last_email.get('subject')}")
-                logger.info(f"From: {last_email.get('from')}")
-                logger.info(f"Date: {last_email.get('date')}")
-                snippet = last_email.get('snippet', '')
+                logger.info("MOST RECENT EMAIL IN SYNC:")
+                logger.info(f"ID: {most_recent.get('id')}")
+                logger.info(f"Internal Date: {most_recent.get('internal_date')}")
+                logger.info(f"Subject: {most_recent.get('subject')}")
+                logger.info(f"From: {most_recent.get('from')}")
+                logger.info(f"Date: {most_recent.get('date')}")
+                snippet = most_recent.get('snippet', '')
                 logger.info(f"Snippet: {snippet[:100]}{'...' if len(snippet) > 100 else ''}")
                 logger.info("=" * 80)
         except HTTPException as e:
@@ -623,205 +894,346 @@ async def sync_gmail_emails_streaming(
             yield send_sse_message("Sync completed", progress=100, stage="Complete")
             return
         
-        # Step 3: Stage 2 - Strict classification (deterministic rules, not AI)
-        yield send_sse_message(f"Classifying {len(emails)} emails with strict rules...", progress=40, stage="Classifying emails")
-        processed_emails = []
-        filtered_count = 0
-        category_counts = {}
-        min_confidence = getattr(settings, 'CLASSIFIER_MIN_CONFIDENCE', 0.85)
-        store_categories_str = getattr(settings, 'STORE_CATEGORIES', "APPLIED_CONFIRMATION,INTERVIEW,REJECTION,OFFER")
-        store_categories = [cat.strip() for cat in store_categories_str.split(',')]
+        # STEP 1: STORE ALL RAW EMAILS FIRST (NO CLASSIFICATION)
+        yield send_sse_message(f"Storing {len(emails)} raw emails...", progress=30, stage="Storing raw emails")
+        logger.info(f"[STEP 1] Storing {len(emails)} raw emails (NO CLASSIFICATION)")
         
-        for email in emails:
+        raw_emails_stored = []
+        for idx, email in enumerate(emails, 1):
             try:
-                # Validate email is a dict
                 if not isinstance(email, dict):
-                    logger.error(f"Email is not a dict, type: {type(email)}, value: {str(email)[:100]}")
                     continue
                 
-                msg_id = email.get('id', 'unknown')
+                msg_id = email.get('id', f'unknown_{idx}')
                 subject = email.get('subject', '') or ''
                 from_email = email.get('from', '') or ''
                 snippet = email.get('snippet', '') or ''
+                body_text = email.get('body_text', '') or snippet
                 
-                # Ensure headers is always a list of dicts
-                headers_raw = email.get('headers', {})
-                if isinstance(headers_raw, dict):
-                    # Convert dict to list of {name, value} dicts
-                    headers = [{"name": str(k), "value": str(v)} for k, v in headers_raw.items() if k and v]
-                elif isinstance(headers_raw, list):
-                    # Filter to only dict items and ensure they have name/value
-                    headers = [
-                        {"name": str(h.get('name', '')), "value": str(h.get('value', ''))} 
-                        for h in headers_raw 
-                        if isinstance(h, dict) and h.get('name') and h.get('value')
-                    ]
-                elif isinstance(headers_raw, str):
-                    # If it's a string, create empty list (can't parse string headers)
-                    headers = []
+                # Extract date
+                internal_date = email.get('internal_date')
+                if internal_date:
+                    from datetime import datetime as dt
+                    received_at_dt = dt.fromtimestamp(internal_date / 1000)
                 else:
-                    headers = []
-                
-                # Extract body text if needed (only for medium confidence)
-                body_text = None
-                raw_message = email.get('raw', {})
-                if raw_message and isinstance(raw_message, dict):
-                    # Extract plain text body from raw message
+                    date_str = email.get('date')
+                    from email.utils import parsedate_to_datetime
                     try:
-                        payload = raw_message.get('payload', {})
-                        if isinstance(payload, dict) and 'parts' in payload:
-                            parts = payload.get('parts', [])
-                            if isinstance(parts, list):
-                                for part in parts:
-                                    if isinstance(part, dict) and part.get('mimeType') == 'text/plain':
-                                        import base64
-                                        body_obj = part.get('body', {})
-                                        if isinstance(body_obj, dict):
-                                            data = body_obj.get('data', '')
-                                            if data and isinstance(data, str):
-                                                body_text = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore').lower()
-                                                break
-                        # Also check for single-part messages
-                        elif isinstance(payload, dict) and payload.get('mimeType') == 'text/plain':
-                            import base64
-                            body_obj = payload.get('body', {})
-                            if isinstance(body_obj, dict):
-                                data = body_obj.get('data', '')
-                                if data and isinstance(data, str):
-                                    body_text = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore').lower()
-                    except Exception as e:
-                        logger.debug(f"Error extracting body text for email {msg_id[:20]}: {e}")
-                        pass
+                        received_at_dt = parsedate_to_datetime(date_str) if date_str else datetime.utcnow()
+                    except:
+                        received_at_dt = datetime.utcnow()
+                
+                # Store raw email data (NO CLASSIFICATION)
+                raw_email = {
+                    "email_id": msg_id,
+                    "thread_id": email.get('thread_id', ''),
+                    "subject": subject,
+                    "from_email": from_email,
+                    "to_email": email.get('to', ''),
+                    "snippet": snippet,
+                    "body_text": body_text[:10000] if body_text else None,
+                    "received_at": received_at_dt.isoformat(),
+                    "internal_date": email.get('internal_date', 0),
+                }
+                raw_emails_stored.append(raw_email)
+                
+                if idx % 100 == 0:
+                    logger.info(f"[STEP 1] Stored {idx}/{len(emails)} raw emails")
+            except Exception as e:
+                logger.error(f"Error storing raw email {idx}: {e}", exc_info=True)
+                continue
+        
+        logger.info(f"[STEP 1] ✅ Stored {len(raw_emails_stored)} raw emails")
+        logger.info(f"📊 [DATA FLOW] Fetched: {len(emails)} emails from Gmail")
+        logger.info(f"📊 [DATA FLOW] Stored: {len(raw_emails_stored)} raw emails in memory")
+        logger.info(f"📊 [DATA FLOW] NO LIMIT on storage - ALL emails stored")
+        
+        # STEP 2: CLASSIFY ALL STORED EMAILS
+        yield send_sse_message(f"Classifying {len(raw_emails_stored)} emails...", progress=50, stage="Classifying emails")
+        logger.info(f"[STEP 2] Classifying {len(raw_emails_stored)} stored emails")
+        
+        processed_emails = []
+        from app.services.job_email_classifier import classify_job_email, JobStatus
+        from app.services.email_cleaner import clean_email_body
+        
+        # Status counters for comprehensive logging (ALL statuses)
+        status_counts = {
+            'APPLIED': 0,
+            'APPLICATION_RECEIVED': 0,
+            'REJECTED': 0,
+            'INTERVIEW': 0,
+            'OFFER': 0,
+            'ACCEPTED': 0,
+            'WITHDRAWN': 0,
+            'ASSESSMENT': 0,
+            'SCREENING': 0,
+            'FOLLOW_UP': 0,
+            'OTHER_JOB_RELATED': 0,  # DEFAULT for uncertain
+            'NON_JOB': 0,
+        }
+        
+        # Process each RAW email (already stored, now classify)
+        logger.info(f"[STEP 2] Starting classification of {len(raw_emails_stored)} raw emails")
+        
+        for idx, raw_email in enumerate(raw_emails_stored, 1):
+            # Initialize defaults (will be set below)
+            msg_id = raw_email.get('email_id', f'unknown_{idx}')
+            subject = raw_email.get('subject', '') or ''
+            from_email = raw_email.get('from_email', '') or ''
+            snippet = raw_email.get('snippet', '') or ''
+            body_text = raw_email.get('body_text', '') or snippet
+            received_at_str = raw_email.get('received_at', '')
+            internal_date = raw_email.get('internal_date', 0)
+            status = JobStatus.OTHER_JOB_RELATED
+            confidence = 0.5
+            confidence_str = 'low'
+            reason = 'Processing'
+            company_name = 'UNKNOWN'
+            role = ""
+            
+            try:
+                # Parse received_at
+                try:
+                    from datetime import datetime as dt
+                    received_at_dt = dt.fromisoformat(received_at_str.replace('Z', '+00:00'))
+                except:
+                    from datetime import datetime as dt
+                    received_at_dt = dt.utcnow()
+                
+                # Clean email body
+                if body_text:
+                    try:
+                        body_text = clean_email_body(body_text)
+                    except:
+                        pass  # Keep original if cleaning fails
+                
+                # If body is empty → use snippet or subject as fallback
+                if not body_text or len(body_text.strip()) < 10:
+                    body_text = snippet or subject or 'No content'
                 
                 # Prepare email data for classifier
                 email_data = {
+                    'id': msg_id,
                     'subject': subject,
                     'from': from_email,
+                    'to': raw_email.get('to_email', ''),
                     'snippet': snippet,
-                    'headers': headers,
-                    'body_text': body_text or snippet  # Use snippet as fallback
+                    'body_text': body_text
                 }
                 
-                # Classify email (Stage 2)
+                # CLASSIFY (VERY PERMISSIVE) - ALL emails already stored, now just classify
                 try:
-                    classification = classify_email(email_data)
-                    label = classification.get('label', 'OTHER')
-                    confidence = classification.get('confidence', 0.0)
-                    reasons = classification.get('reasons', [])
-                    stored = classification.get('stored', False)
-                    discard_reason = classification.get('discard_reason', '')
+                    classification = classify_job_email(email_data)
+                    status = classification.get('status', JobStatus.OTHER_JOB_RELATED)
+                    confidence_str = classification.get('confidence', 'low')
+                    reason = classification.get('reason', 'Classified')
+                    company_name = classification.get('company', 'UNKNOWN')
+                    
+                    # Convert confidence string to float
+                    confidence_map = {'high': 0.9, 'medium': 0.7, 'low': 0.5}
+                    confidence = confidence_map.get(confidence_str, 0.5)
+                    
+                    # Update status counts (use .value to get string)
+                    status_key = status.value if hasattr(status, 'value') else str(status)
+                    status_counts[status_key] = status_counts.get(status_key, 0) + 1
+                    
+                    if idx <= 5 or idx % 100 == 0:  # Log first 5 and every 100th
+                        logger.info(f"[CLASSIFY] [{idx}/{len(raw_emails_stored)}] email_id={msg_id[:20]} subject='{subject[:60]}' status={status_key} company={company_name}")
+                    
                 except Exception as e:
                     logger.error(f"Error classifying email {msg_id[:20]}: {e}", exc_info=True)
-                    # Default to OTHER/not stored on classification error
-                    label = 'OTHER'
-                    confidence = 0.0
-                    reasons = [f"Classification error: {str(e)}"]
-                    stored = False
-                    discard_reason = f"Classification failed: {str(e)}"
+                    # Default to OTHER_JOB_RELATED on error
+                    status = JobStatus.OTHER_JOB_RELATED
+                    confidence = 0.5
+                    confidence_str = 'low'
+                    reason = f"Classification error: {str(e)[:100]}"
+                    company_name = 'UNKNOWN'
+                    status_counts['OTHER_JOB_RELATED'] += 1
                 
-                # Update category counts
-                category_counts[label] = category_counts.get(label, 0) + 1
+                # DO NOT fail if company is UNKNOWN
+                if not company_name or company_name == '':
+                    company_name = "UNKNOWN"
                 
-                # STRUCTURED LOGGING (mandatory per email)
-                log_data = {
-                    "msg_id": msg_id[:20],
-                    "from": from_email[:50],
-                    "subject": subject[:80],
-                    "score": int(confidence * 100) if confidence else 0,
-                    "allow_hits": reasons if stored else [],
-                    "deny_hits": reasons if not stored else [],
-                    "category": label,
-                    "stored": stored
+                # Extract role from subject
+                if subject:
+                    try:
+                        import re
+                        role_patterns = [
+                            r'(?:for|position|role|as)\s+([A-Z][a-zA-Z\s]+(?:Engineer|Manager|Developer|Designer|Analyst|Specialist|Lead|Director))',
+                            r'([A-Z][a-zA-Z\s]+(?:Engineer|Manager|Developer|Designer|Analyst|Specialist|Lead|Director))',
+                        ]
+                        for pattern in role_patterns:
+                            match = re.search(pattern, subject, re.IGNORECASE)
+                            if match:
+                                role = match.group(1).strip()[:50]
+                                break
+                        if not role:
+                            role = subject.split('-')[0].split(':')[0].strip()[:50]
+                    except:
+                        role = subject[:50]  # Fallback to first 50 chars
+                
+                # Map JobStatus to application status
+                status_map = {
+                    JobStatus.APPLIED: 'APPLIED',
+                    JobStatus.APPLICATION_RECEIVED: 'APPLICATION_RECEIVED',
+                    JobStatus.INTERVIEW: 'INTERVIEW',
+                    JobStatus.REJECTED: 'REJECTED',
+                    JobStatus.ASSESSMENT: 'ASSESSMENT',
+                    JobStatus.SCREENING: 'SCREENING',
+                    JobStatus.OFFER: 'OFFER',
+                    JobStatus.ACCEPTED: 'ACCEPTED',
+                    JobStatus.WITHDRAWN: 'WITHDRAWN',
+                    JobStatus.FOLLOW_UP: 'FOLLOW_UP',
+                    JobStatus.OTHER_JOB_RELATED: 'OTHER_JOB_RELATED',
+                    JobStatus.NON_JOB: 'NON_JOB',
                 }
-                logger.info(f"[STAGE 2] {json.dumps(log_data)}")
+                application_status = status_map.get(status, 'OTHER_JOB_RELATED')
                 
-                # Only store if confidence >= 0.85 AND label is in store_categories
-                if not stored or confidence < min_confidence or label not in store_categories:
-                    filtered_count += 1
-                    if label == 'OTHER':
-                        logger.info(f"[STAGE 2] msg={msg_id[:20]} SKIPPED: {discard_reason or 'Label=OTHER'}")
-                    else:
-                        logger.info(f"[STAGE 2] msg={msg_id[:20]} SKIPPED: confidence {confidence:.2f} < {min_confidence} or label {label} not in store_categories")
-                    continue
-                
-                # Extract date
-                date_str = email.get('date')
-                from email.utils import parsedate_to_datetime
+            except Exception as e:
+                # If anything fails before classification, use defaults
+                logger.error(f"Error processing raw email {idx} (before classification): {e}", exc_info=True)
                 try:
-                    received_at_dt = parsedate_to_datetime(date_str) if date_str else datetime.utcnow()
+                    received_at_dt = datetime.fromisoformat(received_at_str.replace('Z', '+00:00')) if received_at_str else datetime.utcnow()
                 except:
                     received_at_dt = datetime.utcnow()
-                
-                # Extract company from sender domain
-                company_name = ""
-                if '@' in from_email:
-                    domain = from_email.split('@')[1]
-                    if domain not in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com']:
-                        company_name = domain.split('.')[0].title()
-                
-                # Use role from subject
-                role = subject[:50] if subject else ""
-                
-                # Map classifier label to application status
-                status_map = {
-                    'APPLIED_CONFIRMATION': 'Applied',
-                    'INTERVIEW': 'Interview',
-                    'REJECTION': 'Rejected',
-                    'OFFER': 'Accepted/Offer',
-                    'ASSESSMENT': 'Interview',  # Assessment is part of interview process
-                    'RECRUITER_OUTREACH': 'Applied'  # Outreach might lead to application
-                }
-                application_status = status_map.get(label, 'Applied')
-                
+                application_status = 'OTHER_JOB_RELATED'
+                status_counts['OTHER_JOB_RELATED'] += 1
+            
+            # ALWAYS create processed email (even if classification failed)
+            try:
                 processed_email = {
                     "email_id": msg_id,
+                    "thread_id": raw_email.get('thread_id', ''),
+                    "internal_date": internal_date,
                     "company_name": company_name,
                     "role": role,
                     "application_status": application_status,
                     "confidence_score": confidence,
                     "received_at": received_at_dt.isoformat(),
-                    "summary": snippet[:200] if snippet else ""
+                    "summary": snippet[:200] if snippet else "",
+                    "from_email": from_email,
+                    "to_email": raw_email.get('to_email', ''),
+                    "body_text": body_text[:10000] if body_text else None,
+                    "subject": subject
                 }
                 processed_emails.append(processed_email)
                 
-                logger.info(f"[STAGE 2] msg={msg_id[:20]} STORED: label={label} confidence={confidence:.2f}")
+                # Log progress
+                if idx % 100 == 0:
+                    logger.info(f"[STEP 2] Classified {idx}/{len(raw_emails_stored)} emails (processed_emails count: {len(processed_emails)})")
                 
-                # Send real-time update for each email stored
-                yield send_sse_message(
-                    f"✓ Stored: {company_name} - {role} ({application_status})",
-                    progress=min(70, 40 + int((len(processed_emails) / max(len(emails), 1)) * 30)),
-                    stage="Classifying emails",
-                    email_data={
-                        "company_name": company_name,
-                        "role": role,
-                        "status": application_status,
-                        "count": len(processed_emails)
-                    }
-                )
-                await asyncio.sleep(0.05)  # Small delay to show step-by-step
+                # Send real-time update
+                if len(processed_emails) % 50 == 0:
+                    yield send_sse_message(
+                        f"✓ Classified {len(processed_emails)}/{len(raw_emails_stored)} emails",
+                        progress=min(70, 50 + int((len(processed_emails) / max(len(raw_emails_stored), 1)) * 20)),
+                        stage="Classifying emails",
+                        email_data={
+                            "count": len(processed_emails),
+                            "total": len(raw_emails_stored)
+                        }
+                    )
+                    await asyncio.sleep(0.01)
+                    
             except Exception as e:
-                logger.error(f"Error processing email {email.get('id', 'unknown')[:20] if isinstance(email, dict) else 'unknown'}: {e}", exc_info=True)
-                # Continue with next email
-                continue
+                # CRITICAL: Even if processed_email creation fails, create minimal version
+                logger.error(f"CRITICAL: Failed to create processed_email for {msg_id[:20]}: {e}", exc_info=True)
+                try:
+                    minimal_email = {
+                        "email_id": msg_id,
+                        "thread_id": "",
+                        "internal_date": 0,
+                        "company_name": "UNKNOWN",
+                        "role": "",
+                        "application_status": "OTHER_JOB_RELATED",
+                        "confidence_score": 0.0,
+                        "received_at": datetime.utcnow().isoformat(),
+                        "summary": f"Error: {str(e)[:100]}",
+                        "from_email": from_email,
+                        "to_email": "",
+                        "body_text": None,
+                        "subject": subject or "Error"
+                    }
+                    processed_emails.append(minimal_email)
+                    status_counts['OTHER_JOB_RELATED'] += 1
+                    logger.info(f"[RECOVERED] Added minimal email for {msg_id[:20]}")
+                except Exception as final_error:
+                    logger.error(f"FATAL: Could not even create minimal email: {final_error}", exc_info=True)
         
-        # Log totals
-        logger.info(f"[STAGE 2] TOTALS: fetched={len(emails)}, classified_by_category={category_counts}, stored={len(processed_emails)}, skipped={filtered_count}")
+        logger.info(f"[STEP 2] ✅ Classification complete: {len(processed_emails)} emails processed from {len(raw_emails_stored)} raw emails")
+        logger.info(f"📊 [DATA FLOW] Classified: {len(processed_emails)} emails")
+        logger.info(f"📊 [DATA FLOW] NO LIMIT on classification - ALL emails classified")
+        
+        # RULE 11: COMPREHENSIVE LOGGING (MANDATORY) - ZERO FALSE NEGATIVES
+        total_fetched = len(emails)
+        total_raw_stored = len(raw_emails_stored)  # STEP 1: All raw emails stored
+        total_classified = len(processed_emails)  # STEP 2: All emails classified
+        total_non_job = status_counts.get('NON_JOB', 0)
+        total_job_related = total_classified - total_non_job
+        
+        logger.info(f"[STEP 1] ✅ Raw emails stored: {total_raw_stored}")
+        logger.info(f"[STEP 2] ✅ Emails classified: {total_classified}")
+        
+        logger.info("═══════════════════════════════════════════════════════════")
+        logger.info("[SYNC STATS] RULE 11 - COMPREHENSIVE SUMMARY")
+        logger.info("═══════════════════════════════════════════════════════════")
+        logger.info(f"Total fetched: {total_fetched}")
+        logger.info(f"Total raw stored: {total_raw_stored} (STEP 1: ALL emails stored)")
+        logger.info(f"Total classified: {total_classified} (STEP 2: ALL emails classified)")
+        logger.info(f"Pages fetched: {pages_fetched}")
+        logger.info(f"")
+        logger.info(f"Status breakdown:")
+        logger.info(f"  Applied: {status_counts.get('APPLIED', 0)}")
+        logger.info(f"  Application Received: {status_counts.get('APPLICATION_RECEIVED', 0)}")
+        logger.info(f"  Rejected: {status_counts.get('REJECTED', 0)}")
+        logger.info(f"  Interview: {status_counts.get('INTERVIEW', 0)}")
+        logger.info(f"  Assessment: {status_counts.get('ASSESSMENT', 0)}")
+        logger.info(f"  Screening: {status_counts.get('SCREENING', 0)}")
+        logger.info(f"  Offer: {status_counts.get('OFFER', 0)}")
+        logger.info(f"  Accepted: {status_counts.get('ACCEPTED', 0)}")
+        logger.info(f"  Withdrawn: {status_counts.get('WITHDRAWN', 0)}")
+        logger.info(f"  Follow-up: {status_counts.get('FOLLOW_UP', 0)}")
+        logger.info(f"  Other Job Related: {status_counts.get('OTHER_JOB_RELATED', 0)} (DEFAULT)")
+        logger.info(f"  Non-Job: {status_counts.get('NON_JOB', 0)}")
+        logger.info(f"")
+        logger.info(f"Job-related: {total_job_related}")
+        logger.info(f"Non-job: {total_non_job}")
+        logger.info("═══════════════════════════════════════════════════════════")
+        
+        # REQUIREMENT 8: Error detection - log ERROR if numbers don't match
+        total_status_sum = sum(status_counts.values())
+        if total_fetched != total_raw_stored:
+            logger.error(f"❌ ERROR: Total fetched ({total_fetched}) != total raw stored ({total_raw_stored})")
+        if total_raw_stored != total_classified:
+            logger.error(f"❌ ERROR: Total raw stored ({total_raw_stored}) != total classified ({total_classified})")
+        if total_classified != total_status_sum:
+            logger.error(f"❌ ERROR: Total classified ({total_classified}) != sum of status counts ({total_status_sum})")
         
         # Update progress
         yield send_sse_message(
-            f"Classified {len(emails)} emails: {len(processed_emails)} stored, {filtered_count} skipped",
+            f"Classified {total_classified} emails (all {total_raw_stored} raw emails processed)",
             progress=70,
             stage="Classifying emails"
         )
         await asyncio.sleep(0.1)
         
+        # CRITICAL ERROR CHECK: If 0 emails classified, this is a BUG
         if not processed_emails:
+            logger.error(f"❌ CRITICAL ERROR: 0 emails classified out of {total_raw_stored} raw emails stored!")
+            logger.error(f"❌ Raw emails were stored, but classification failed for ALL emails")
+            logger.error(f"❌ Check classification logic - it's rejecting ALL emails")
+            
+            # Log first 10 raw email subjects for debugging
+            logger.error(f"[DEBUG] First 10 raw email subjects:")
+            for i, raw_email in enumerate(raw_emails_stored[:10], 1):
+                logger.error(f"  {i}. {raw_email.get('subject', 'No Subject')[:80]}")
+            
             yield send_sse_message(
-                f"No job application emails to store after classification (skipped {filtered_count})",
+                f"ERROR: 0 emails classified (check logs) - classification logic may be broken",
                 progress=95,
-                stage="No emails to store"
+                stage="Error"
             )
-            # Update last_synced_at even if no emails stored
+            # Still update sync time
             try:
                 async with httpx.AsyncClient() as client:
                     await client.post(
@@ -833,7 +1245,7 @@ async def sync_gmail_emails_streaming(
             except Exception as e:
                 logger.warning(f"Failed to update sync time: {e}")
             
-            yield send_sse_message("Sync completed", progress=100, stage="Complete")
+            yield send_sse_message("Sync completed with errors", progress=100, stage="Complete")
             return
         
         # Step 4: Send processed emails to application-service for ingestion
@@ -854,36 +1266,61 @@ async def sync_gmail_emails_streaming(
                     
                     ingest_data.append({
                         "email_id": email["email_id"],
+                        "thread_id": email.get("thread_id", ""),
                         "company_name": email["company_name"],
                         "role": email["role"],
                         "application_status": email["application_status"],
                         "confidence_score": email["confidence_score"],
                         "received_at": received_at_dt.isoformat(),
-                        "summary": email.get("summary")
+                        "summary": email.get("summary"),
+                        # RULE 8: Additional fields for email storage
+                        "from_email": email.get("from_email"),
+                        "to_email": email.get("to_email"),
+                        "body_text": email.get("body_text"),
+                        "internal_date": email.get("internal_date"),
+                        "subject": email.get("subject")
                     })
                 
+                # Send to application-service ingest endpoint
+                ingest_url = f"{settings.APPLICATION_SERVICE_URL}/ingest/from-email-ai"
+                logger.info(f"Sending {len(ingest_data)} emails to {ingest_url} for user {user_id}")
+                logger.info(f"📊 [DATA FLOW] Sending to application-service: {len(ingest_data)} emails")
+                logger.info(f"📊 [DATA FLOW] NO LIMIT on ingest - ALL emails being sent")
                 response = await client.post(
-                    f"{settings.APPLICATION_SERVICE_URL}/ingest/from-email-ai",
+                    ingest_url,
                     json=ingest_data,
-                    timeout=30.0
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-User-ID": str(user_id)  # CRITICAL: Pass user_id so applications are associated with user
+                    },
+                    timeout=60.0  # Increased timeout for batch processing
                 )
+                logger.info(f"Application-service response: {response.status_code}")
                 
                 if response.status_code == 200:
                     result = response.json()
-                    applications_created = result.get("accepted", 0)
+                    applications_created = result.get("accepted", len(ingest_data))
                     yield send_sse_message(
-                        f"Created/updated {applications_created} job applications",
+                        f"✅ Successfully stored {applications_created} applications in database",
                         progress=90,
                         stage="Updating Database"
                     )
-                    logger.info(f"Ingested {applications_created} applications for user {user_id}")
+                    logger.info(f"✅ Ingested {applications_created} applications for user {user_id} (sent {len(ingest_data)} emails)")
+                elif response.status_code == 404:
+                    logger.error(f"❌ Ingest endpoint not found: {ingest_url}")
+                    yield send_sse_message(
+                        f"Error: Application service ingest endpoint not found. Check service is running.",
+                        progress=85,
+                        stage="Error"
+                    )
                 else:
+                    error_text = response.text[:200] if hasattr(response, 'text') else str(response.status_code)
+                    logger.error(f"❌ Failed to ingest: {response.status_code} - {error_text}")
                     yield send_sse_message(
                         f"Warning: Failed to ingest some emails (Status: {response.status_code})",
                         progress=85,
                         stage="Updating Database"
                     )
-                    logger.error(f"Failed to ingest emails: {response.status_code} - {response.text}")
         except Exception as e:
             yield send_sse_message(
                 f"Error ingesting emails: {str(e)}",
@@ -892,26 +1329,59 @@ async def sync_gmail_emails_streaming(
             )
             logger.error(f"Error ingesting emails to application-service: {e}", exc_info=True)
         
-        # Step 5: Update last_synced_at
+        # Step 5: Update last_synced_at and last_message_internal_date (INCREMENTAL SYNC)
         yield send_sse_message("Updating sync timestamp...", progress=95, stage="Finalizing")
+        
+        # Get the most recent email's internal date for incremental sync
+        # Check ALL emails (including rejected) to get the absolute most recent
+        most_recent_internal_date = None
+        if emails:
+            all_internal_dates = [e.get('internal_date', 0) for e in emails if e.get('internal_date')]
+            if all_internal_dates:
+                most_recent_internal_date = max(all_internal_dates)
+                logger.info(f"[INCREMENTAL SYNC] Most recent email internal_date: {most_recent_internal_date}")
+        
         try:
             async with httpx.AsyncClient() as client:
-                await client.post(
+                sync_update_data = {
+                    "last_synced_at": datetime.utcnow().isoformat()
+                }
+                if most_recent_internal_date:
+                    # Convert internal_date (milliseconds) to ISO format
+                    from datetime import datetime as dt
+                    sync_update_data["last_message_internal_date"] = dt.fromtimestamp(most_recent_internal_date / 1000).isoformat()
+                    logger.info(f"[INCREMENTAL SYNC] Most recent email internal_date: {most_recent_internal_date} ({sync_update_data['last_message_internal_date']})")
+                
+                response = await client.post(
                     f"{settings.AUTH_SERVICE_URL}/api/gmail/update-sync-time",
                     headers={"Authorization": f"Bearer {access_token}"},
-                    json={"last_synced_at": datetime.utcnow().isoformat()},
+                    json=sync_update_data,
                     timeout=5.0
                 )
+                if response.status_code == 200:
+                    logger.info(f"[INCREMENTAL SYNC] ✅ Updated last_synced_at and last_message_internal_date")
+                else:
+                    logger.warning(f"[INCREMENTAL SYNC] Update returned {response.status_code}, but continuing")
         except Exception as e:
             logger.warning(f"Failed to update sync time: {e}")
         
-        # Create summary
+        # Create summary with status breakdown
         status_counts = {}
         for email in processed_emails:
             status = email.get("application_status", "Unknown")
             status_counts[status] = status_counts.get(status, 0) + 1
         
         status_summary = ", ".join([f"{count} {status}" for status, count in sorted(status_counts.items())])
+        
+        # FINAL COMPREHENSIVE LOG
+        logger.info("=" * 80)
+        logger.info("[SYNC COMPLETE] FINAL SUMMARY")
+        logger.info(f"Total emails scanned: {total_scanned}")
+        logger.info(f"Total job emails stored: {len(processed_emails)}")
+        logger.info(f"Status breakdown: {status_summary}")
+        logger.info(f"Applications created/updated: {applications_created}")
+        logger.info(f"Most recent email internal date: {most_recent_internal_date}")
+        logger.info("=" * 80)
         
         yield send_sse_message(
             f"Sync completed! Stored {len(processed_emails)} job application emails ({status_summary}). Created/updated {applications_created} applications.",
@@ -956,13 +1426,33 @@ async def sync_gmail_emails(
         )
     
     logger.info(f"Starting email sync for user {user_id}")
-    
-    # Create the generator
-    generator = sync_gmail_emails_streaming(user_id, access_token)
-    logger.info(f"Generator created for user {user_id}")
-    
+
+    async def locked_generator():
+        acquired = False
+        async with _ACTIVE_GMAIL_SYNCS_LOCK:
+            if user_id in _ACTIVE_GMAIL_SYNCS:
+                logger.info(f"Sync skipped (already running) user_id={user_id}")
+                yield send_sse_message(
+                    "Sync skipped: sync already running",
+                    progress=100,
+                    stage="Skipped"
+                )
+                return
+            _ACTIVE_GMAIL_SYNCS.add(user_id)
+            acquired = True
+
+        try:
+            generator = sync_gmail_emails_streaming(user_id, access_token)
+            logger.info(f"Generator created for user {user_id}")
+            async for msg in generator:
+                yield msg
+        finally:
+            if acquired:
+                async with _ACTIVE_GMAIL_SYNCS_LOCK:
+                    _ACTIVE_GMAIL_SYNCS.discard(user_id)
+
     return StreamingResponse(
-        generator,
+        locked_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

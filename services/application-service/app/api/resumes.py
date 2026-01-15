@@ -7,11 +7,15 @@ import os
 import shutil
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 router = APIRouter()
 
-UPLOAD_DIR = "uploads/resumes"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Cross-platform path handling
+# Use pathlib for cross-platform compatibility
+BASE_DIR = Path(__file__).parent.parent.parent
+UPLOAD_DIR = BASE_DIR / "uploads" / "resumes"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 @router.post("/upload")
 def upload_resume(file: UploadFile = File(...), tags: str = "general", db: Session = Depends(get_db)):
@@ -20,13 +24,14 @@ def upload_resume(file: UploadFile = File(...), tags: str = "general", db: Sessi
     Tags can be comma-separated strings (e.g. "frontend,fullstack").
     """
     file_id = str(uuid.uuid4())
-    ext = file.filename.split(".")[-1]
+    ext = file.filename.split(".")[-1] if "." in file.filename else "pdf"
     safe_filename = f"{file_id}.{ext}"
-    file_path = os.path.join(UPLOAD_DIR, safe_filename)
+    # Use pathlib for cross-platform path handling
+    file_path = UPLOAD_DIR / safe_filename
     
     # Save file locally
     try:
-        with open(file_path, "wb") as buffer:
+        with open(str(file_path), "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File save error: {str(e)}")
@@ -35,9 +40,12 @@ def upload_resume(file: UploadFile = File(...), tags: str = "general", db: Sessi
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
 
     # Create DB Record
+    # Convert path to string for storage (use forward slashes for cross-platform compatibility)
+    storage_url = str(file_path).replace("\\", "/")
+    
     resume = Resume(
         file_name=file.filename,
-        storage_url=file_path, # In prod, this would be a Supabase/S3 URL
+        storage_url=storage_url, # In prod, this would be a Supabase/S3 URL
         tags=tag_list
     )
     db.add(resume)

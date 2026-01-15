@@ -38,7 +38,26 @@ export default function Applications() {
     // Hooks
     const filterStatus = searchParams.get('status') || 'All';
     const searchQuery = searchParams.get('q') || '';
-    const { applications, loading } = useApplications({ status: filterStatus });
+    const { applications, loading, refresh: refreshApplications } = useApplications({ status: filterStatus });
+    
+    // Listen for sync completion events to refresh applications
+    useEffect(() => {
+        const handleSyncComplete = () => {
+            // Refresh applications when sync completes - wait for backend to finish
+            setTimeout(() => {
+                refreshApplications();
+                // Also reload page to ensure all data is fresh
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1000);
+            }, 3000);
+        };
+        
+        window.addEventListener('sync-complete', handleSyncComplete);
+        return () => {
+            window.removeEventListener('sync-complete', handleSyncComplete);
+        };
+    }, [refreshApplications]);
 
     const [selectedApp, setSelectedApp] = useState(null);
     const [selectedIds, setSelectedIds] = useState(new Set());
@@ -62,25 +81,19 @@ export default function Applications() {
         navigate(`/applications/${app.id}`);
     };
 
-    // Filtering - also filter out invalid statuses
+    // Filtering - SHOW ALL applications (only filter by user's search/filter preferences)
     const filteredApps = useMemo(() => {
-        // Valid job application statuses
-        const validStatuses = ["Applied", "Interview", "Rejected", "Ghosted", "Accepted/Offer", 
-                              "Screening", "Interview (R1)", "Interview (R2)", "Interview (Final)",
-                              "Offer", "Accepted", "Hired"];
+        console.log("📊 [APPLICATIONS PAGE] Total applications received:", applications.length);
+        console.log("📊 [APPLICATIONS PAGE] NO STATUS FILTERING - showing ALL applications");
         
         return applications.filter(app => {
-            // First, filter out invalid/Unknown statuses
-            const status = app.status || "";
-            const isValidStatus = validStatuses.includes(status) || 
-                                 status.includes("Interview") || 
-                                 ["Offer", "Accepted", "Hired"].includes(status);
-            if (!isValidStatus || status === "Unknown") {
-                return false; // Don't show invalid statuses
-            }
+            // CRITICAL: Don't filter out any statuses - show ALL applications
+            // Only apply user's search and status filter preferences
             
-            // Then apply user filters
+            // Apply user's status filter (if not "All")
             const matchesStatus = filterStatus === 'All' || app.status === filterStatus;
+            
+            // Apply user's search query
             let matchesSearch = true;
             if (searchQuery) {
                 const lowerQuery = searchQuery.toLowerCase();
@@ -90,7 +103,12 @@ export default function Applications() {
                     companyName.includes(lowerQuery) ||
                     roleName.includes(lowerQuery);
             }
-            return matchesStatus && matchesSearch;
+            
+            const shouldShow = matchesStatus && matchesSearch;
+            if (!shouldShow && app) {
+                console.log(`📊 [FILTER] Excluding app: ${app.company_name || 'Unknown'} - ${app.role_title || 'Unknown'} (status: ${app.status}, filter: ${filterStatus}, search: ${searchQuery})`);
+            }
+            return shouldShow;
         });
     }, [applications, filterStatus, searchQuery]);
 

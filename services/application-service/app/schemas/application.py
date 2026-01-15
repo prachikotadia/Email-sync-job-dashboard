@@ -5,14 +5,21 @@ import uuid
 
 # --- Shared Specs ---
 class ProcessedEmail(BaseModel):
-    """Matches contract from Email Intelligence Service"""
-    email_id: str
+    """RULE 8: Processed email with all required fields for storage"""
+    email_id: str  # Gmail message ID
+    thread_id: str  # Gmail thread ID
     company_name: str
     role: str = "Unknown Role"
     application_status: str
     confidence_score: float
     received_at: datetime
     summary: Optional[str] = None
+    # Additional fields for RULE 8
+    from_email: Optional[str] = None
+    to_email: Optional[str] = None
+    body_text: Optional[str] = None
+    internal_date: Optional[int] = None  # Gmail internal date (milliseconds)
+    subject: Optional[str] = None
 
 # --- Application Schemas ---
 class ApplicationResponse(BaseModel):

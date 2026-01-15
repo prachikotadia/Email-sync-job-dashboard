@@ -67,7 +67,60 @@ create table if not exists application_resumes (
     primary key (application_id, resume_id)
 );
 
+-- Emails Table (RULE 8: Store all job-related emails)
+create table if not exists emails (
+    id uuid primary key default uuid_generate_v4(),
+    user_id uuid references users(id) on delete cascade,
+    application_id uuid references applications(id) on delete cascade,
+    gmail_message_id text unique not null,
+    thread_id text not null,
+    subject text not null,
+    from_email text not null,
+    to_email text,
+    body_text text,
+    received_at timestamp with time zone not null,
+    internal_date bigint, -- Gmail internal date (milliseconds)
+    status text not null, -- APPLIED, REJECTED, INTERVIEW, OFFER, ASSESSMENT, FOLLOW_UP, GHOSTED
+    confidence_score float default 0.0,
+    company_name text,
+    role_title text,
+    created_at timestamp with time zone default now(),
+    unique(gmail_message_id)
+);
+
+-- Application Events Table (RULE 8: Timeline of events per application)
+create table if not exists application_events (
+    id uuid primary key default uuid_generate_v4(),
+    application_id uuid references applications(id) on delete cascade not null,
+    email_id uuid references emails(id) on delete set null,
+    event_type text not null, -- APPLIED, REJECTED, INTERVIEW, OFFER, ASSESSMENT, FOLLOW_UP, GHOSTED
+    event_date timestamp with time zone not null,
+    confidence_score float default 0.0,
+    metadata jsonb, -- Additional event data
+    created_at timestamp with time zone default now()
+);
+
+-- Gmail Accounts Table (RULE 9: Multi-user support)
+create table if not exists gmail_accounts (
+    id uuid primary key default uuid_generate_v4(),
+    user_id uuid references users(id) on delete cascade not null unique,
+    gmail_email text not null,
+    is_active boolean default true,
+    connected_at timestamp with time zone default now(),
+    last_synced_at timestamp with time zone,
+    last_message_internal_date bigint, -- For incremental sync
+    created_at timestamp with time zone default now()
+);
+
 -- Indexes
 create index if not exists idx_companies_name on companies(name);
 create index if not exists idx_applications_user on applications(user_id);
 create index if not exists idx_applications_status on applications(status);
+create index if not exists idx_emails_user on emails(user_id);
+create index if not exists idx_emails_application on emails(application_id);
+create index if not exists idx_emails_thread on emails(thread_id);
+create index if not exists idx_emails_gmail_message_id on emails(gmail_message_id);
+create index if not exists idx_emails_received_at on emails(received_at);
+create index if not exists idx_application_events_application on application_events(application_id);
+create index if not exists idx_application_events_date on application_events(event_date);
+create index if not exists idx_gmail_accounts_user on gmail_accounts(user_id);

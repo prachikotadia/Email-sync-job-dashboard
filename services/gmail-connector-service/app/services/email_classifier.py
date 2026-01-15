@@ -259,9 +259,9 @@ def classify_email(email_data: Dict[str, Any]) -> Dict[str, Any]:
             best_category = category
             matched_reasons = category_reasons
     
-    # CONFIDENCE REQUIREMENT - must be >= 0.85 to store
-    # ERR ON THE SIDE OF EXCLUDING: If ambiguous, DO NOT STORE
-    if best_category and best_confidence >= 0.85:
+    # CONFIDENCE REQUIREMENT - lowered to 0.5 to accept more emails
+    # Accept emails with moderate confidence to capture all application emails
+    if best_category and best_confidence >= 0.5:
         # High confidence - only store if we're very sure it's application-related
         # Additional check: must have specific application intent keywords
         application_intent_keywords = [

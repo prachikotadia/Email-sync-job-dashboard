@@ -1,11 +1,15 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 import os
+from pathlib import Path
 
 
 class Settings(BaseSettings):
-    # Database
-    AUTH_DATABASE_URL: str = "sqlite:///./auth.db"
+    # Database - Cross-platform path handling
+    AUTH_DATABASE_URL: str = os.getenv(
+        "AUTH_DATABASE_URL",
+        f"sqlite:///{Path(__file__).parent.parent.parent / 'auth.db'}"
+    )
     
     # JWT
     JWT_SECRET: str = "change_me"

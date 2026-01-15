@@ -236,8 +236,9 @@ async def me_proxy(
         )
 
 
-@router.get("/auth/google/login")
-async def google_login_proxy(request: Request):
+# COMMENTED OUT - Using direct route in main.py due to 405 issues
+# @router.get("/auth/google/login")
+async def google_login_proxy_disabled(request: Request):
     """Proxy Google OAuth login initiation to auth-service (no JWT required)."""
     try:
         import httpx
@@ -318,8 +319,40 @@ async def google_login_proxy(request: Request):
         )
 
 
-@router.get("/auth/google/callback")
-async def google_callback_proxy(request: Request):
+# COMMENTED OUT - Using direct route in main.py due to 405 issues
+# @router.get("/auth/google/status")
+async def google_status_proxy_disabled(request: Request):
+    """Proxy Google OAuth status (no JWT required)."""
+    try:
+        # No auth required for status, just forward to auth-service
+        headers = dict(request.headers)
+        headers.pop("host", None)
+
+        response = await auth_client.forward_request(
+            method="GET",
+            path="/auth/google/status",
+            headers=headers
+        )
+
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.headers.get("content-type", "application/json")
+        )
+    except Exception as e:
+        logger.error(f"Error proxying Google status: {e}", exc_info=True)
+        request_id = get_request_id(request)
+        return create_error_response(
+            code="AUTH_SERVICE_ERROR",
+            message="Failed to get Google OAuth status",
+            status_code=500,
+            request_id=request_id
+        )
+
+# COMMENTED OUT - Using direct route in main.py due to 405 issues
+# @router.get("/auth/google/callback")
+async def google_callback_proxy_disabled(request: Request):
     """Proxy Google OAuth callback to auth-service (no JWT required)."""
     try:
         import httpx

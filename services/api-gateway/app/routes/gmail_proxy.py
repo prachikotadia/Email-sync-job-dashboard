@@ -9,6 +9,7 @@ from app.config import get_settings, get_google_redirect_uri
 import httpx
 import logging
 import json
+import asyncio
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -16,6 +17,10 @@ settings = get_settings()
 
 # Gmail connector service URL
 GMAIL_SERVICE_URL = settings.GMAIL_SERVICE_URL
+
+# Per-user sync lock (in-memory). Prevents accidental duplicate sync triggers.
+_ACTIVE_GMAIL_SYNCS = set()
+_ACTIVE_GMAIL_SYNCS_LOCK = asyncio.Lock()
 
 
 @router.get("/gmail/connect")
@@ -255,13 +260,39 @@ async def sync_gmail_emails(
     request.state.user_context = current_user
     
     try:
+        user_id = getattr(current_user, "user_id", None) or getattr(current_user, "id", None)
+        if not user_id:
+            return create_error_response(
+                code="BAD_REQUEST",
+                message="User ID missing from auth context",
+                status_code=400,
+                request_id=request_id,
+            )
+
         # Forward request to gmail-connector-service with streaming support
         headers = dict(request.headers)
         headers.pop("host", None)
         headers.pop("content-length", None)
         
         async def generate():
+            acquired = False
             try:
+                # Acquire per-user lock
+                async with _ACTIVE_GMAIL_SYNCS_LOCK:
+                    if user_id in _ACTIVE_GMAIL_SYNCS:
+                        logger.info(f"Gmail sync skipped (already running) user_id={user_id} request_id={request_id}")
+                        payload = {
+                            "message": "Sync skipped: sync already running",
+                            "progress": 100,
+                            "stage": "Skipped",
+                            "status": "skipped",
+                            "reason": "sync already running",
+                        }
+                        yield f"data: {json.dumps(payload)}\n\n".encode()
+                        return
+                    _ACTIVE_GMAIL_SYNCS.add(user_id)
+                    acquired = True
+
                 logger.info(f"Forwarding sync request to {GMAIL_SERVICE_URL}/gmail/sync")
                 # Use a longer timeout for streaming (5 minutes for read, since sync can take time)
                 timeout = httpx.Timeout(300.0, connect=10.0, read=300.0, write=10.0, pool=10.0)
@@ -299,6 +330,10 @@ async def sync_gmail_emails(
                 logger.error(f"Unexpected error in sync stream: {e}", exc_info=True)
                 error_msg = json.dumps({'message': f'Unexpected error: {str(e)}', 'progress': 0, 'stage': 'Error'})
                 yield f"data: {error_msg}\n\n".encode()
+            finally:
+                if acquired:
+                    async with _ACTIVE_GMAIL_SYNCS_LOCK:
+                        _ACTIVE_GMAIL_SYNCS.discard(user_id)
         
         return StreamingResponse(
             generate(),

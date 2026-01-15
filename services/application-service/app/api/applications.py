@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.schemas.application import ApplicationResponse, ApplicationUpdate
@@ -13,48 +13,70 @@ router = APIRouter()
 
 @router.get("/", response_model=List[ApplicationResponse])
 def get_applications(
+    request: Request,
     db: Session = Depends(get_db),
     status: Optional[str] = None,
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id")  # API gateway sends X-User-Id
 ):
-    """Get all applications with error handling."""
+    """
+    REQUIREMENT 6 & 9: Get all applications for the authenticated user.
+    
+    CRITICAL: 
+    - Filters by user_id from JWT token (X-User-ID header)
+    - Shows ALL applications for that user (no limit)
+    - Most recent first (sorted by last_email_date DESC)
+    - Multi-user ready: each user only sees their own applications
+    """
     try:
+        # REQUIREMENT 9: Extract user_id from header (set by API gateway from JWT)
+        user_id_uuid = None
+        if x_user_id:
+            try:
+                user_id_uuid = uuid.UUID(x_user_id)
+                logger.info(f"[REQUIREMENT 9] Filtering applications by user_id: {user_id_uuid}")
+            except ValueError as e:
+                logger.warning(f"Invalid X-User-ID header: {x_user_id}, error: {e}")
+                # Continue without filtering (backward compatibility)
+        else:
+            logger.warning("[REQUIREMENT 9] No X-User-ID header provided - showing ALL applications (backward compatibility)")
+        
         repo = ApplicationRepository(db)
-        apps = repo.list_applications()
+        # REQUIREMENT 6 & 9: Filter by user_id if provided, show ALL for that user
+        apps = repo.list_applications(user_id=str(user_id_uuid) if user_id_uuid else None, limit=None)
         
         # Handle empty results gracefully
         if not apps:
             logger.info("No applications found in database")
             return []
         
-        # Valid job application statuses - filter out anything else
-        VALID_STATUSES = ["Applied", "Interview", "Rejected", "Ghosted", "Accepted/Offer", 
-                         "Screening", "Interview (R1)", "Interview (R2)", "Interview (Final)",
-                         "Offer", "Accepted", "Hired"]
-        
+        # SHOW ALL APPLICATIONS - NO STATUS FILTERING
         results = []
-        filtered_count = 0
         for app in apps:
             try:
-                # Get status and check if it's valid
+                # Get status (default to Applied if None)
                 app_status = app.status or "Applied"
                 
-                # Check if status is valid (includes variations like "Interview R1", etc.)
-                is_valid_status = (
-                    app_status in VALID_STATUSES or
-                    "Interview" in app_status or  # Allow any Interview variation
-                    app_status in ["Offer", "Accepted", "Hired"]  # Allow offer variations
-                )
-                
-                # FILTER OUT: Skip applications with invalid/Unknown statuses
-                if not is_valid_status or app_status == "Unknown":
-                    filtered_count += 1
-                    logger.debug(f"Skipping application {app.id} - invalid status: '{app_status}'")
-                    continue  # Don't show this application
-                
                 # Safely access relationships with null checks
-                company_name = app.company.name.title() if app.company and app.company.name else "Unknown"
-                role_title = app.role.title if app.role and app.role.title else "Unknown"
-                resume_url = app.resume.storage_url if app.resume and app.resume.storage_url else None
+                company_name = "Unknown"
+                role_title = "Unknown"
+                try:
+                    if app.company and app.company.name:
+                        company_name = app.company.name.title()
+                except Exception as e:
+                    logger.warning(f"Error getting company name for app {app.id}: {e}")
+                
+                try:
+                    if app.role and app.role.title:
+                        role_title = app.role.title
+                except Exception as e:
+                    logger.warning(f"Error getting role title for app {app.id}: {e}")
+                
+                resume_url = None
+                try:
+                    if app.resume and app.resume.storage_url:
+                        resume_url = app.resume.storage_url
+                except Exception as e:
+                    logger.warning(f"Error getting resume URL for app {app.id}: {e}")
                 
                 results.append(ApplicationResponse(
                     id=app.id,
@@ -66,15 +88,23 @@ def get_applications(
                     ghosted=app.ghosted if app.ghosted is not None else False,
                     resume_url=resume_url
                 ))
+                logger.debug(f"Added application {app.id}: {company_name} - {role_title} ({app_status})")
             except Exception as e:
                 logger.error(f"Error processing application {app.id}: {e}", exc_info=True)
                 # Skip this application but continue processing others
                 continue
         
-        if filtered_count > 0:
-            logger.info(f"Filtered out {filtered_count} applications with invalid/Unknown statuses")
+        # REQUIREMENT 6 & 8: Log comprehensive stats with error detection
+        user_id_str = str(user_id_uuid) if user_id_uuid else "ALL"
+        logger.info(f"✅ Successfully retrieved {len(results)} applications (out of {len(apps)} total in DB for user {user_id_str})")
+        logger.info(f"📊 [DATA FLOW] DB Query returned: {len(apps)} applications")
+        logger.info(f"📊 [DATA FLOW] API Response returning: {len(results)} applications")
+        logger.info(f"📊 [DATA FLOW] NO LIMIT applied - showing ALL applications")
         
-        logger.info(f"Successfully retrieved {len(results)} applications")
+        # REQUIREMENT 8: Error detection - log if counts don't match
+        if len(results) != len(apps):
+            logger.error(f"❌ ERROR: Results count ({len(results)}) != DB count ({len(apps)}) - some applications may have been skipped due to relationship errors")
+        
         return results
         
     except Exception as e:

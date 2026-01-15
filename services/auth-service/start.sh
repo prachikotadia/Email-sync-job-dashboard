@@ -30,4 +30,4 @@ fi
 
 # Start the service
 echo "Starting auth-service on port 8003..."
-python -m uvicorn app.main:app --reload --port 8003
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8003

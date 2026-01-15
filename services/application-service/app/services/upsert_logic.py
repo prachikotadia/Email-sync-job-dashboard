@@ -2,11 +2,14 @@ from sqlalchemy.orm import Session
 from app.db.repositories import ApplicationRepository
 from app.services.status_rules import StatusPriority
 from datetime import datetime
+from typing import Optional
+import uuid
 
 class UpsertLogic:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, user_id: Optional[uuid.UUID] = None):
         self.repo = ApplicationRepository(db)
         self.db = db
+        self.user_id = user_id
 
     def process(self, 
                 company_name: str, 
@@ -25,7 +28,8 @@ class UpsertLogic:
             role_id=role.id,
             status=status,
             confidence=confidence,
-            email_date=email_date
+            email_date=email_date,
+            user_id=self.user_id
         )
         
         # 3. If it already existed, we apply Logic

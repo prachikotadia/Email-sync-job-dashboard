@@ -61,16 +61,41 @@ export function AuthProvider({ children }) {
                 if (storedAccessToken && storedRefreshToken && storedUser) {
                     setAccessToken(storedAccessToken);
                     setRefreshToken(storedRefreshToken);
-                    setUser(JSON.parse(storedUser));
+                    try {
+                        // Safely parse stored user
+                        const parsedUser = JSON.parse(storedUser);
+                        // Ensure parsed user is a valid object
+                        if (parsedUser && typeof parsedUser === 'object') {
+                            setUser(parsedUser);
+                        } else {
+                            throw new Error('Invalid user data format');
+                        }
+                    } catch (parseError) {
+                        console.error('Failed to parse stored user:', parseError);
+                        // Clear invalid stored user
+                        localStorage.removeItem(USER_KEY);
+                        setUser(null);
+                    }
                     // Verify token is still valid by fetching user info
                     try {
                         const userInfo = await authService.getMe(storedAccessToken);
-                        setUser(userInfo);
-                        localStorage.setItem(USER_KEY, JSON.stringify(userInfo));
+                        // Ensure userInfo is a valid object
+                        if (userInfo && typeof userInfo === 'object') {
+                            setUser(userInfo);
+                            localStorage.setItem(USER_KEY, JSON.stringify(userInfo));
+                        } else {
+                            throw new Error('Invalid user data received');
+                        }
                     } catch (error) {
+                        console.error('Token verification failed:', error);
                         // Token invalid, try refresh
                         if (storedRefreshToken) {
-                            await handleRefreshToken(storedRefreshToken);
+                            try {
+                                await handleRefreshToken(storedRefreshToken);
+                            } catch (refreshError) {
+                                console.error('Token refresh failed:', refreshError);
+                                clearAuth();
+                            }
                         } else {
                             clearAuth();
                         }

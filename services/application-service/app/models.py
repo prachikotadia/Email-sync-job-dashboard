@@ -77,6 +77,8 @@ class Application(Base):
     company = relationship("Company", back_populates="applications")
     role = relationship("Role", back_populates="applications")
     status_history = relationship("StatusHistory", back_populates="application")
+    emails = relationship("Email", back_populates="application", order_by="Email.received_at")
+    events = relationship("ApplicationEvent", back_populates="application", order_by="ApplicationEvent.event_date")
     
     # Just for basic access to current resume
     resume = relationship("Resume") 
@@ -93,3 +95,55 @@ class StatusHistory(Base):
     changed_at = Column(DateTime, default=datetime.utcnow)
     
     application = relationship("Application", back_populates="status_history")
+
+class Email(Base):
+    """RULE 8: Store all job-related emails."""
+    __tablename__ = "emails"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    application_id = Column(UUID(as_uuid=True), ForeignKey("applications.id"), nullable=True)
+    gmail_message_id = Column(String, unique=True, nullable=False, index=True)
+    thread_id = Column(String, nullable=False, index=True)
+    subject = Column(String, nullable=False)
+    from_email = Column(String, nullable=False)
+    to_email = Column(String, nullable=True)
+    body_text = Column(String, nullable=True)
+    received_at = Column(DateTime, nullable=False, index=True)
+    internal_date = Column(Integer, nullable=True)  # Gmail internal date (milliseconds)
+    status = Column(String, nullable=False)  # APPLIED, REJECTED, INTERVIEW, etc.
+    confidence_score = Column(Float, default=0.0)
+    company_name = Column(String, nullable=True)
+    role_title = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User")
+    application = relationship("Application", back_populates="emails")
+
+class ApplicationEvent(Base):
+    """RULE 8: Timeline of events per application."""
+    __tablename__ = "application_events"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id = Column(UUID(as_uuid=True), ForeignKey("applications.id"), nullable=False, index=True)
+    email_id = Column(UUID(as_uuid=True), ForeignKey("emails.id"), nullable=True)
+    event_type = Column(String, nullable=False)  # APPLIED, REJECTED, INTERVIEW, etc.
+    event_date = Column(DateTime, nullable=False, index=True)
+    confidence_score = Column(Float, default=0.0)
+    metadata = Column(JSON, nullable=True)  # Additional event data
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    application = relationship("Application", back_populates="events")
+    email = relationship("Email")
+
+class GmailAccount(Base):
+    """RULE 9: Multi-user Gmail account support."""
+    __tablename__ = "gmail_accounts"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    gmail_email = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+    connected_at = Column(DateTime, default=datetime.utcnow)
+    last_synced_at = Column(DateTime, nullable=True)
+    last_message_internal_date = Column(Integer, nullable=True)  # For incremental sync
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user = relationship("User")

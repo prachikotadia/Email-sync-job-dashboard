@@ -4,9 +4,15 @@ from app.api import health, auth, gmail, google_auth
 from app.config import get_settings
 from app.db.session import init_db
 import logging
+import platform
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Log platform information for debugging
+logger.info(f"🚀 Starting Auth Service on {platform.system()} {platform.release()}")
+logger.info(f"   Python: {platform.python_version()}")
+logger.info(f"   Platform: {platform.platform()}")
 
 settings = get_settings()
 
@@ -16,11 +22,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS
+# CORS - CRITICAL: Cannot use wildcard "*" with credentials: "include"
+# Must use explicit origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:5173", "http://localhost:5174"],  # Explicit origins, NO wildcard
+    allow_credentials=True,  # Required for cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
