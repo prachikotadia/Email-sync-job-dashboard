@@ -1,0 +1,149 @@
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from typing import List, Dict, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+class GmailClient:
+    """
+    Gmail API client
+    Fetches ALL emails with no pagination limits
+    """
+    
+    def __init__(self, user_id: int, user_email: str):
+        self.user_id = user_id
+        self.user_email = user_email
+        self.service = None
+        self._initialize_service()
+    
+    def _initialize_service(self):
+        """
+        Initialize Gmail API service
+        In production, fetch credentials from secure storage/auth service
+        """
+        # Placeholder - actual implementation would:
+        # 1. Fetch OAuth tokens from auth service or secure storage
+        # 2. Build credentials object
+        # 3. Create service
+        
+        # For now, this is a skeleton
+        # TODO: Implement actual credential fetching
+        pass
+    
+    async def get_user_email(self) -> str:
+        """
+        Get Gmail email address for validation
+        """
+        if not self.service:
+            raise Exception("Gmail service not initialized")
+        
+        try:
+            profile = self.service.users().getProfile(userId='me').execute()
+            return profile.get('emailAddress', '')
+        except Exception as e:
+            logger.error(f"Error getting user email: {e}")
+            raise
+    
+    def get_all_messages(self, query: str = "", history_id: Optional[str] = None) -> tuple[List[Dict], str]:
+        """
+        Fetch ALL messages matching query
+        NO pagination limits - uses pagination to get everything
+        Returns: (messages, latest_history_id)
+        """
+        if not self.service:
+            raise Exception("Gmail service not initialized")
+        
+        messages = []
+        page_token = None
+        latest_history_id = None
+        
+        if history_id:
+            # Incremental sync using history
+            try:
+                history = self.service.users().history().list(
+                    userId='me',
+                    startHistoryId=history_id,
+                    historyTypes=['messageAdded', 'messageDeleted']
+                ).execute()
+                
+                history_records = history.get('history', [])
+                message_ids = []
+                
+                for record in history_records:
+                    if 'messagesAdded' in record:
+                        for msg in record['messagesAdded']:
+                            message_ids.append(msg['message']['id'])
+                    if 'messagesDeleted' in record:
+                        for msg in record['messagesDeleted']:
+                            # Handle deleted messages if needed
+                            pass
+                
+                # Fetch full message details
+                for msg_id in message_ids:
+                    try:
+                        message = self.service.users().messages().get(
+                            userId='me',
+                            id=msg_id,
+                            format='full'
+                        ).execute()
+                        messages.append(message)
+                    except Exception as e:
+                        logger.warning(f"Error fetching message {msg_id}: {e}")
+                        continue
+                
+                latest_history_id = history.get('historyId')
+                
+            except Exception as e:
+                logger.error(f"Error in incremental sync: {e}")
+                # Fall back to full sync
+                history_id = None
+        
+        if not history_id:
+            # Full sync: paginate until nextPageToken is null. No hard limits.
+            while True:
+                try:
+                    result = self.service.users().messages().list(
+                        userId='me', q=query, pageToken=page_token, maxResults=500
+                    ).execute()
+                    message_ids = result.get('messages', [])
+                    latest_history_id = result.get('historyId')
+                    for msg in message_ids:
+                        try:
+                            message = self.service.users().messages().get(
+                                userId='me', id=msg['id'], format='full'
+                            ).execute()
+                            messages.append(message)
+                        except Exception as e:
+                            logger.warning(f"Error fetching message {msg['id']}: {e}")
+                            continue
+                    page_token = result.get('nextPageToken')
+                    if not page_token:
+                        break
+                except Exception as e:
+                    logger.error(f"Error fetching messages: {e}")
+                    break
+            logger.info(f"Fetched: {len(messages)} emails (100%)")
+        else:
+            logger.info(f"Fetched: {len(messages)} new/changed emails")
+        return messages, latest_history_id
+    
+    def get_message_count(self, query: str = "") -> int:
+        """
+        Get total count of messages matching query
+        Note: This is an estimate from Gmail API
+        """
+        if not self.service:
+            raise Exception("Gmail service not initialized")
+        
+        try:
+            result = self.service.users().messages().list(
+                userId='me',
+                q=query,
+                maxResults=1  # Just to get the result size
+            ).execute()
+            
+            return result.get('resultSizeEstimate', 0)
+        except Exception as e:
+            logger.error(f"Error getting message count: {e}")
+            return 0

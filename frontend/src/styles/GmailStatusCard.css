@@ -1,0 +1,84 @@
+.gmail-status-card {
+  background: #1e293b;
+  padding: 2rem;
+  border-radius: 1rem;
+  border: 1px solid #334155;
+}
+
+.status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.status-indicator {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.status-indicator.connected {
+  background: #10b981;
+  color: white;
+}
+
+.status-indicator.disconnected {
+  background: #ef4444;
+  color: white;
+}
+
+.status-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.info-message {
+  color: #94a3b8;
+}
+
+.error-message {
+  color: #fca5a5;
+  padding: 1rem;
+  background: #7f1d1d;
+  border-radius: 0.5rem;
+}
+
+.lock-message {
+  color: #fbbf24;
+  padding: 0.75rem;
+  background: #78350f;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+}
+
+.sync-button {
+  padding: 1rem;
+  background: #6366f1;
+  color: white;
+  border: none;
+  border-radius: 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.sync-button:hover:not(:disabled) {
+  background: #4f46e5;
+}
+
+.sync-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.gmail-guest-message {
+  color: #94a3b8;
+  padding: 1rem;
+  background: #334155;
+  border-radius: 0.5rem;
+  font-size: 0.9375rem;
+}

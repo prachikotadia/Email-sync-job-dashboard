@@ -1,0 +1,312 @@
+/* ===== Resumes – Neomorphism + Typography ===== */
+
+.resumes-page {
+  display: flex;
+  gap: 1.5rem;
+  max-width: 1400px;
+  margin: 0 auto;
+  font-family: var(--font-sans);
+}
+
+.resumes-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.resumes-header {
+  margin-bottom: 1.5rem;
+}
+
+.resumes-header h1 {
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin-bottom: 0.25rem;
+}
+
+.resumes-subtitle {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.resumes-upload {
+  position: relative;
+  background: var(--bg-elevated);
+  border: 2px dashed var(--accent);
+  border-radius: var(--neo-r);
+  padding: 3rem 2rem;
+  margin-bottom: 1.5rem;
+  text-align: center;
+  transition: all 0.2s;
+  box-shadow: var(--neo-raised);
+}
+
+.resumes-upload:hover {
+  background: rgba(99, 102, 241, 0.06);
+  border-color: var(--accent-light);
+  box-shadow: var(--neo-raised), 0 0 0 1px rgba(99, 102, 241, 0.15);
+}
+
+.resumes-upload-input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  overflow: hidden;
+}
+
+.resumes-upload-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.resumes-upload-label svg {
+  color: var(--accent-light);
+}
+
+.resumes-upload-title {
+  font-size: 1.125rem;
+  font-weight: 700;
+}
+
+.resumes-upload-hint {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.resumes-upload-limit {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.resumes-list-section {
+  background: var(--bg-elevated);
+  border-radius: var(--neo-r);
+  padding: 1.5rem;
+  box-shadow: var(--neo-raised);
+  border: 1px solid var(--border-subtle);
+}
+
+.resumes-list-section h2 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 1rem;
+}
+
+.resumes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.resumes-list-empty {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 1rem 0;
+}
+
+.resume-item {
+  padding: 0.875rem 1rem;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--neo-r-sm);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--text);
+  box-shadow: var(--neo-inset-sm);
+}
+
+.resume-item-name {
+  word-break: break-all;
+}
+
+/* Missing Confirmations sidebar – neo */
+.resumes-sidebar {
+  width: 320px;
+  min-width: 320px;
+  flex-shrink: 0;
+}
+
+.resumes-missing-card {
+  background: var(--bg-elevated);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: var(--neo-r);
+  padding: 1.5rem;
+  position: sticky;
+  top: 1.5rem;
+  box-shadow: var(--neo-raised), 0 0 0 1px rgba(99, 102, 241, 0.08);
+}
+
+.resumes-missing-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.resumes-missing-icon {
+  width: 26px;
+  height: 26px;
+  background: linear-gradient(145deg, #f59e0b 0%, #d97706 100%);
+  color: #1e293b;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.875rem;
+  font-weight: 800;
+  box-shadow: var(--neo-raised-sm);
+}
+
+.resumes-missing-header h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.resumes-missing-desc {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+  line-height: 1.5;
+}
+
+.resumes-missing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.resumes-missing-item {
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--neo-r-sm);
+  padding: 1rem;
+  box-shadow: var(--neo-inset-sm);
+}
+
+.resumes-missing-item-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.resumes-missing-company {
+  font-weight: 700;
+  font-size: 0.9375rem;
+  color: var(--text);
+}
+
+.resumes-missing-role {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.resumes-missing-time {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+}
+
+.resumes-missing-suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.resumes-missing-suggestion-label {
+  color: var(--text-muted);
+}
+
+.resumes-missing-suggestion-file {
+  color: var(--accent-light);
+  font-weight: 600;
+}
+
+.resumes-missing-confidence {
+  padding: 0.25rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.resumes-missing-confidence.confidence-high {
+  background: #22c55e;
+  color: #0f172a;
+}
+
+.resumes-missing-confidence.confidence-medium {
+  background: #f59e0b;
+  color: #1e293b;
+}
+
+.resumes-missing-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.resumes-confirm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.85rem;
+  background: linear-gradient(145deg, #22c55e 0%, #16a34a 100%);
+  color: #0f172a;
+  border: none;
+  border-radius: var(--neo-r-sm);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: var(--neo-raised-sm);
+}
+
+.resumes-confirm-btn:hover {
+  transform: translateY(-1px);
+}
+
+.resumes-edit-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--neo-r-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: var(--neo-inset-sm);
+}
+
+.resumes-edit-btn:hover {
+  color: var(--text);
+  box-shadow: var(--neo-inset);
+}
+
+@media (max-width: 1024px) {
+  .resumes-page { flex-direction: column; }
+  .resumes-sidebar { width: 100%; min-width: 0; }
+  .resumes-missing-card { position: static; }
+}

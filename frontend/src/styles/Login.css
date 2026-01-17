@@ -1,0 +1,76 @@
+/* ===== Login – Neomorphism + Typography ===== */
+
+.login-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  background: var(--bg-base);
+  font-family: var(--font-sans);
+}
+
+.login-card {
+  background: var(--bg-elevated);
+  padding: 3rem 3.5rem;
+  border-radius: var(--neo-r-lg);
+  min-width: 420px;
+  max-width: 440px;
+  text-align: center;
+  box-shadow: var(--neo-raised);
+  border: 1px solid var(--border-subtle);
+}
+
+.login-header h1 {
+  font-size: 2.25rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.5rem;
+  color: var(--accent-light);
+}
+
+.login-header p {
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-bottom: 2rem;
+}
+
+.login-button {
+  width: 100%;
+  padding: 1rem 1.5rem;
+  background: linear-gradient(145deg, var(--accent) 0%, #4f46e5 100%);
+  color: white;
+  border: none;
+  border-radius: var(--neo-r-sm);
+  font-size: 1rem;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: var(--neo-raised-sm), 0 4px 14px rgba(99, 102, 241, 0.4);
+}
+
+.login-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 6px 6px 14px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(99, 102, 241, 0.45);
+}
+
+.login-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.login-button-guest {
+  margin-top: 1rem;
+  background: transparent;
+  border: 2px solid var(--accent);
+  color: var(--accent-light);
+  box-shadow: none;
+}
+
+.login-button-guest:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.12);
+  box-shadow: var(--neo-inset-sm);
+}
