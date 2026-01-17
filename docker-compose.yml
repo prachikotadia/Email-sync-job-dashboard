@@ -28,12 +28,14 @@ services:
       - AUTH_SERVICE_URL=http://auth-service:8001
       - GMAIL_SERVICE_URL=http://gmail-connector-service:8002
       - CLASSIFIER_SERVICE_URL=http://classifier-service:8003
+      - RESUME_SERVICE_URL=http://resume-service:8004
       - JWT_SECRET=${JWT_SECRET}
       - JWT_ALGORITHM=HS256
     depends_on:
       - auth-service
       - gmail-connector-service
       - classifier-service
+      - resume-service
     networks:
       - job-tracker-network
 
@@ -83,6 +85,23 @@ services:
       - "8003:8003"
     environment:
       - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - job-tracker-network
+
+  resume-service:
+    build:
+      context: ./services/resume-service
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=http://auth-service:8001
     depends_on:
       db:
         condition: service_healthy

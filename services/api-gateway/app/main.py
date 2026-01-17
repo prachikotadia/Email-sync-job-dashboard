@@ -5,7 +5,7 @@ import httpx
 import os
 import time
 from datetime import datetime, timezone
-from app.routers import auth, gmail, export
+from app.routers import auth, gmail, export, resume
 from app.middleware.auth_middleware import verify_token
 
 _health_start = time.time()
@@ -30,6 +30,7 @@ CLASSIFIER_SERVICE_URL = os.getenv("CLASSIFIER_SERVICE_URL", "http://classifier-
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(gmail.router, prefix="/api/gmail", tags=["gmail"])
 app.include_router(export.router, prefix="/api/exports", tags=["exports"])
+app.include_router(resume.router, prefix="/api/resumes", tags=["resumes"])
 
 
 async def _probe(url: str, path: str = "/health") -> dict:
@@ -46,10 +47,12 @@ async def _probe(url: str, path: str = "/health") -> dict:
 @app.get("/health")
 async def health():
     """Health check endpoint (without /api prefix) for consistency with other services."""
+    RESUME_SERVICE_URL = os.getenv("RESUME_SERVICE_URL", "http://resume-service:8004")
     auth_d = await _probe(AUTH_SERVICE_URL)
     gmail_d = await _probe(GMAIL_SERVICE_URL)
     classifier_d = await _probe(CLASSIFIER_SERVICE_URL)
-    deps = {"auth_service": auth_d, "gmail_service": gmail_d, "classifier_service": classifier_d}
+    resume_d = await _probe(RESUME_SERVICE_URL)
+    deps = {"auth_service": auth_d, "gmail_service": gmail_d, "classifier_service": classifier_d, "resume_service": resume_d}
     all_ok = all(d.get("status") == "ok" for d in deps.values())
     return {
         "status": "ok" if all_ok else "degraded",
