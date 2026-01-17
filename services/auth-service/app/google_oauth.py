@@ -10,10 +10,10 @@ class GoogleOAuth:
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
         
+        # Section 2 / Step 4: Auth only. No Gmail scopes here; add in Step 5 when needed.
         self.scopes = [
             "https://www.googleapis.com/auth/userinfo.email",
             "https://www.googleapis.com/auth/userinfo.profile",
-            "https://www.googleapis.com/auth/gmail.readonly",
         ]
         
         self.client_config = {

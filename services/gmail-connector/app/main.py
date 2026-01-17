@@ -2,16 +2,19 @@ from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.gmail_client import GmailClient
 from app.sync_engine import SyncEngine
 from app.classifier import Classifier
 from app.company_extractor import CompanyExtractor
-from app.database import get_db, init_db, User, Application, SyncState
+from app.database import get_db, init_db, engine, User, Application, SyncState
 from app.ghosted_detector import GhostedDetector
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import uuid
 import logging
+import time
+import httpx
 
 # Configure logging
 logging.basicConfig(
@@ -19,6 +22,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+_health_start = time.time()
 
 app = FastAPI(title="Gmail Connector Service")
 
@@ -417,4 +422,33 @@ async def check_ghosted(background_tasks: BackgroundTasks, db: Session = Depends
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "gmail-connector"}
+    # Database
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        database = {"status": "ok"}
+    except Exception as e:
+        database = {"status": "error", "message": str(e)}
+
+    # Classifier service
+    classifier_url = os.getenv("CLASSIFIER_SERVICE_URL", "http://classifier-service:8003")
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(f"{classifier_url.rstrip('/')}/health")
+        classifier_svc = {"status": "ok" if r.status_code == 200 else "error", "status_code": r.status_code}
+    except Exception as e:
+        classifier_svc = {"status": "error", "message": str(e)}
+
+    running = sum(1 for j in sync_jobs.values() if j.get("status") == "running")
+    overall = "ok" if database.get("status") == "ok" else "degraded"
+
+    return {
+        "status": overall,
+        "service": "gmail-connector",
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "uptime_seconds": round(time.time() - _health_start, 2),
+        "database": database,
+        "classifier_service": classifier_svc,
+        "active_sync_jobs": running,
+        "total_sync_jobs": len(sync_jobs),
+    }
