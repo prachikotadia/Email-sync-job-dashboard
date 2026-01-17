@@ -5,7 +5,7 @@ import httpx
 import os
 import time
 from datetime import datetime, timezone
-from app.routers import auth, gmail
+from app.routers import auth, gmail, export
 from app.middleware.auth_middleware import verify_token
 
 _health_start = time.time()
@@ -29,6 +29,7 @@ CLASSIFIER_SERVICE_URL = os.getenv("CLASSIFIER_SERVICE_URL", "http://classifier-
 # Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(gmail.router, prefix="/api/gmail", tags=["gmail"])
+app.include_router(export.router, prefix="/api/exports", tags=["exports"])
 
 
 async def _probe(url: str, path: str = "/health") -> dict:

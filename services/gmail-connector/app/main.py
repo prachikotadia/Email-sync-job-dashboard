@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -9,7 +10,9 @@ from app.classifier import Classifier
 from app.company_extractor import CompanyExtractor
 from app.database import get_db, init_db, engine, User, Application, SyncState
 from app.ghosted_detector import GhostedDetector
+from app.export_service import generate_export
 from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 import os
 import uuid
 import logging
@@ -56,6 +59,12 @@ class SyncStartRequest(BaseModel):
 
 class ClearRequest(BaseModel):
     user_id: str
+
+class ExportRequest(BaseModel):
+    format: str  # csv, xlsx, json, pdf
+    category: str  # ALL, APPLIED, REJECTED, INTERVIEW, OFFER, GHOSTED
+    dateRange: dict  # { "from": "YYYY-MM-DD" | null, "to": "YYYY-MM-DD" | null }
+    fields: List[str]  # List of field names to include
 
 @app.get("/status")
 async def get_status(user_id: str = Query(...), db: Session = Depends(get_db)):
@@ -419,6 +428,95 @@ async def check_ghosted(background_tasks: BackgroundTasks, db: Session = Depends
     """
     background_tasks.add_task(ghosted_detector.check_all_users, db)
     return {"message": "Ghosted check started"}
+
+@app.post("/export")
+async def export_applications(
+    request: ExportRequest,
+    user_id: str = Query(...),  # user_id is email from JWT
+    db: Session = Depends(get_db)
+):
+    """
+    Export applications in various formats (CSV, Excel, JSON, PDF)
+    Production-grade export with real data from database
+    """
+    try:
+        # Get user by email
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Parse date range
+        date_from = None
+        date_to = None
+        if request.dateRange:
+            if request.dateRange.get("from"):
+                try:
+                    date_from = datetime.fromisoformat(request.dateRange["from"].replace("Z", "+00:00"))
+                except:
+                    date_from = datetime.strptime(request.dateRange["from"], "%Y-%m-%d")
+            if request.dateRange.get("to"):
+                try:
+                    date_to = datetime.fromisoformat(request.dateRange["to"].replace("Z", "+00:00"))
+                except:
+                    date_to = datetime.strptime(request.dateRange["to"], "%Y-%m-%d")
+                    # Include entire day
+                    date_to = date_to.replace(hour=23, minute=59, second=59)
+        
+        # Validate format
+        valid_formats = ["csv", "xlsx", "json", "pdf"]
+        if request.format.lower() not in valid_formats:
+            raise HTTPException(status_code=400, detail=f"Invalid format. Must be one of: {valid_formats}")
+        
+        # Validate fields
+        valid_fields = [
+            "company_name",
+            "category",
+            "received_at",
+            "last_updated",
+            "source_email",
+            "gmail_message_id",
+        ]
+        if not request.fields:
+            raise HTTPException(status_code=400, detail="At least one field must be selected")
+        for field in request.fields:
+            if field not in valid_fields:
+                raise HTTPException(status_code=400, detail=f"Invalid field: {field}")
+        
+        # Generate export
+        file_bytes, mime_type, filename = generate_export(
+            db=db,
+            user_id=user.id,
+            user_email=user.email,
+            format_type=request.format.lower(),
+            category=request.category,
+            date_from=date_from,
+            date_to=date_to,
+            fields=request.fields,
+        )
+        
+        logger.info(
+            f"Export SUCCESS: user={user.email}, format={request.format}, "
+            f"category={request.category}, fields={len(request.fields)}"
+        )
+        
+        # Return file response
+        return Response(
+            content=file_bytes,
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(file_bytes)),
+            },
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.error(f"Export validation error: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Export error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Export generation failed: {str(e)}")
 
 @app.get("/health")
 async def health():
