@@ -12,24 +12,37 @@ export default function ExportData() {
   }
 
   return (
-    <div className="export-page">
-      <div className="export-header">
-        <h1>Export Data</h1>
-        <p className="export-subtitle">Download your application history for analysis</p>
+    <div className="export-page-perfect">
+      {/* Header Section */}
+      <div className="dashboard-header-section">
+        <div className="dashboard-title-area">
+          <h1 className="dashboard-main-title">Export Data</h1>
+          <p className="dashboard-subtitle">Download your application history for analysis</p>
+        </div>
       </div>
 
-      <div className="export-card">
-        <div className="export-card-icon">
-          <IconExcel />
+      {/* Export Card */}
+      <div className="content-card-perfect export-card-perfect">
+        <div className="content-card-header">
+          <div className="content-card-title-group">
+            <div className="content-card-icon content-card-icon-success">
+              <IconExcel />
+            </div>
+            <div>
+              <h2 className="content-card-title">Export to Excel</h2>
+              <p className="content-card-subtitle">Generate comprehensive reports</p>
+            </div>
+          </div>
         </div>
-        <div className="export-form">
-          <div className="export-field">
-            <label htmlFor="export-date">Date Range</label>
+
+        <div className="export-form-perfect">
+          <div className="export-field-perfect">
+            <label htmlFor="export-date" className="export-label">Date Range</label>
             <select
               id="export-date"
               value={dateRange}
               onChange={(e) => setDateRange(e.target.value)}
-              className="export-select"
+              className="export-select-perfect"
             >
               <option value="Last 7 days">Last 7 days</option>
               <option value="Last 30 days">Last 30 days</option>
@@ -37,13 +50,13 @@ export default function ExportData() {
               <option value="All time">All time</option>
             </select>
           </div>
-          <div className="export-field">
-            <label htmlFor="export-status">Status Filter</label>
+          <div className="export-field-perfect">
+            <label htmlFor="export-status" className="export-label">Status Filter</label>
             <select
               id="export-status"
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="export-select"
+              className="export-select-perfect"
             >
               <option value="All Statuses">All Statuses</option>
               <option value="Applied">Applied</option>
@@ -54,11 +67,15 @@ export default function ExportData() {
             </select>
           </div>
         </div>
-        <button type="button" onClick={handleDownload} className="export-download-btn">
+
+        <button type="button" onClick={handleDownload} className="export-download-btn-perfect">
           <IconDownload />
           <span>Download Excel Report</span>
         </button>
-        <p className="export-meta">Includes metadata, email counts, and timeline events.</p>
+
+        <p className="export-meta-perfect">
+          Includes metadata, email counts, and timeline events.
+        </p>
       </div>
     </div>
   )

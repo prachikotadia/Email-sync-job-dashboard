@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { gmailService } from '../services/gmailService'
 import { MOCK_APPLICATIONS } from '../mock/applications.mock'
-import { IconDownload, IconList, IconGridSmall } from '../components/icons'
+import { IconDownload, IconList, IconGridSmall, IconBriefcase, IconSearch } from '../components/icons'
 import '../styles/Applications.css'
 
 const PAGE_SIZE = 10
@@ -67,108 +67,135 @@ export default function Applications() {
   }
 
   return (
-    <div className="applications-page">
-      <div className="applications-header">
-        <div>
-          <h1>Applications</h1>
-          <p className="applications-subtitle">Track and manage your pipeline</p>
+    <div className="applications-page-perfect">
+      {/* Header Section */}
+      <div className="dashboard-header-section">
+        <div className="dashboard-title-area">
+          <h1 className="dashboard-main-title">Applications</h1>
+          <p className="dashboard-subtitle">Track and manage your pipeline</p>
         </div>
-        <div className="applications-header-actions">
-          <button type="button" className="applications-btn applications-btn-export">
+        <div className="dashboard-actions">
+          <button type="button" className="dashboard-action-btn dashboard-action-btn-secondary">
             <IconDownload />
             <span>Export</span>
           </button>
-          <button type="button" className="applications-btn applications-btn-primary">
+          <button type="button" className="dashboard-action-btn">
             Add Entry
           </button>
         </div>
       </div>
 
-      <div className="applications-filters">
-        <input
-          type="text"
-          placeholder="Search company, role..."
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setPage(1) }}
-          className="applications-search"
-        />
-        <select
-          value={statusFilter}
-          onChange={(e) => { setStatusFilter(e.target.value); setPage(1) }}
-          className="applications-status-select"
-        >
-          {statuses.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
+      {/* Filters Card */}
+      <div className="content-card-perfect filters-card-perfect">
+        <div className="filters-content">
+          <div className="filter-search-wrapper">
+            <IconSearch className="filter-search-icon" />
+            <input
+              type="text"
+              placeholder="Search company, role..."
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1) }}
+              className="filter-search-input"
+            />
+          </div>
+          <select
+            value={statusFilter}
+            onChange={(e) => { setStatusFilter(e.target.value); setPage(1) }}
+            className="filter-select"
+          >
+            {statuses.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          <div className="filter-view-toggle">
+            <button
+              type="button"
+              className={`view-toggle-btn ${viewMode === 'list' ? 'active' : ''}`}
+              onClick={() => setViewMode('list')}
+              aria-label="List view"
+            >
+              <IconList />
+            </button>
+            <button
+              type="button"
+              className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
+              onClick={() => setViewMode('grid')}
+              aria-label="Grid view"
+            >
+              <IconGridSmall />
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="applications-body">
-        <div className="applications-view-toggle">
-          <button
-            type="button"
-            className={viewMode === 'list' ? 'active' : ''}
-            onClick={() => setViewMode('list')}
-            aria-label="List view"
-          >
-            <IconList />
-          </button>
-          <button
-            type="button"
-            className={viewMode === 'grid' ? 'active' : ''}
-            onClick={() => setViewMode('grid')}
-            aria-label="Grid view"
-          >
-            <IconGridSmall />
-          </button>
+      {/* Applications Card */}
+      <div className="content-card-perfect applications-card-perfect">
+        <div className="content-card-header">
+          <div className="content-card-title-group">
+            <div className="content-card-icon">
+              <IconBriefcase />
+            </div>
+            <div>
+              <h2 className="content-card-title">All Applications</h2>
+              <p className="content-card-subtitle">{total} total applications</p>
+            </div>
+          </div>
         </div>
 
         {pageItems.length === 0 ? (
-          <div className="applications-empty">
-            <div className="applications-empty-icon" />
-            <p className="applications-empty-title">No records found</p>
-            <p className="applications-empty-text">
+          <div className="applications-empty-perfect">
+            <div className="empty-icon-wrapper">
+              <IconBriefcase />
+            </div>
+            <p className="empty-title">No records found</p>
+            <p className="empty-text">
               Try adjusting your filters or search query to find what you&apos;re looking for.
             </p>
           </div>
         ) : (
-          <div className={`applications-list applications-list-${viewMode}`}>
+          <div className={`applications-list-perfect applications-list-${viewMode}`}>
             {pageItems.map((app, i) => (
-              <div key={app.id || i} className="application-row">
-                <div className="application-row-main">
-                  <span className="application-row-company">{app.company || 'Unknown'}</span>
-                  <span className="application-row-role">{app.role || '—'}</span>
+              <div key={app.id || i} className="application-item-perfect">
+                <div className="application-item-icon">
+                  <IconBriefcase />
                 </div>
-                <span className={`status-badge status-${(app.status || '').toLowerCase()}`}>
+                <div className="application-item-info">
+                  <div className="application-company">{app.company || 'Unknown'}</div>
+                  <div className="application-role">{app.role || '—'}</div>
+                </div>
+                <div className={`activity-status activity-status-${(app.status || '').toLowerCase()}`}>
                   {app.status || '—'}
-                </span>
+                </div>
               </div>
             ))}
           </div>
         )}
-      </div>
 
-      <div className="applications-footer">
-        <span className="applications-pagination-text">
-          Showing {total === 0 ? 0 : start + 1} to {end} of {total} results
-        </span>
-        <div className="applications-pagination">
-          <button
-            type="button"
-            disabled={page <= 1}
-            onClick={() => setPage((p) => p - 1)}
-            aria-label="Previous page"
-          >
-            &lt;
-          </button>
-          <button
-            type="button"
-            disabled={end >= total}
-            onClick={() => setPage((p) => p + 1)}
-            aria-label="Next page"
-          >
-            &gt;
-          </button>
+        {/* Pagination */}
+        <div className="applications-pagination-perfect">
+          <span className="pagination-text">
+            Showing {total === 0 ? 0 : start + 1} to {end} of {total} results
+          </span>
+          <div className="pagination-controls">
+            <button
+              type="button"
+              className="pagination-btn"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => p - 1)}
+              aria-label="Previous page"
+            >
+              &lt;
+            </button>
+            <button
+              type="button"
+              className="pagination-btn"
+              disabled={end >= total}
+              onClick={() => setPage((p) => p + 1)}
+              aria-label="Next page"
+            >
+              &gt;
+            </button>
+          </div>
         </div>
       </div>
     </div>

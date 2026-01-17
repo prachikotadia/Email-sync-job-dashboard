@@ -11,3 +11,12 @@ export const MOCK_DASHBOARD_STATS = {
   offer: 31,   /* Offer / Accepted (5 categories) */
   ghosted: 134,
 }
+
+// Realistic chart data for Application Overview - always visible
+export const MOCK_CHART_DATA = {
+  applied: 612,
+  interview: 84,
+  rejected: 398,
+  offer: 31,
+  ghosted: 134,
+}
