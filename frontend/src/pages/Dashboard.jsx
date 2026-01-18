@@ -5,6 +5,7 @@ import { useProfileImage } from '../context/ProfileImageContext'
 import { useProfileLinks } from '../context/ProfileLinksContext'
 import { gmailService } from '../services/gmailService'
 import SyncCompleteModal from '../components/SyncCompleteModal'
+import SyncLogModal from '../components/SyncLogModal'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, LabelList, Cell } from 'recharts'
 import { 
   IconRocket, 
@@ -46,6 +47,7 @@ function Dashboard() {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(() => !isGuest)
   const [showSyncCompleteModal, setShowSyncCompleteModal] = useState(false)
+  const [showSyncLogModal, setShowSyncLogModal] = useState(false)
   
   const pollIntervalRef = useRef(null)
   const syncCheckRef = useRef(false)
@@ -96,13 +98,64 @@ function Dashboard() {
       progress: null,
     })
 
-    pollIntervalRef.current = setInterval(async () => {
+    let consecutiveFailures = 0
+    let currentBackoff = 2000 // Start with 2s
+    let inFlightRequest = false // Prevent overlapping requests
+
+    const pollStatus = async () => {
+      // Prevent overlapping requests
+      if (inFlightRequest) {
+        return
+      }
+
+      inFlightRequest = true
       try {
         const status = await gmailService.getSyncStatus(jobId)
+        
+        // Reset backoff on success
+        consecutiveFailures = 0
+        currentBackoff = 2000
+
         setSyncState(prev => ({
           ...prev,
           progress: status,
         }))
+
+        // Handle unavailable state (200 response with state:"unavailable" or status:"unavailable")
+        if (status.status === 'unavailable' || status.state === 'UNAVAILABLE') {
+          consecutiveFailures++
+          const retryAfter = status.retryAfterSeconds || currentBackoff / 1000
+          console.warn(`Gmail service unavailable. Retrying in ${retryAfter}s...`)
+          
+          // Update interval to retry after specified delay
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+          }
+          pollIntervalRef.current = setTimeout(pollStatus, retryAfter * 1000)
+          
+          // Stop after 10 consecutive failures
+          if (consecutiveFailures >= 10) {
+            if (pollIntervalRef.current) {
+              clearTimeout(pollIntervalRef.current)
+              pollIntervalRef.current = null
+            }
+            setError(`Gmail service temporarily unavailable. Please refresh the page to retry.`)
+            setSyncState(prev => ({ ...prev, isRunning: false }))
+            return
+          }
+          return
+        }
+
+        // Handle NOT_FOUND state (stop polling, show error)
+        if (status.status === 'not_found' || status.state === 'NOT_FOUND') {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
+          }
+          setError(status.errors?.[0] || 'Sync job not found. Please start a new sync.')
+          setSyncState(prev => ({ ...prev, isRunning: false }))
+          return
+        }
 
         // Update stats from status.counts (backend is source of truth)
         if (status.counts) {
@@ -117,34 +170,76 @@ function Dashboard() {
           })
         }
 
-        // Stop polling if sync is complete
-        if (status.status === 'completed' || status.status === 'failed') {
+        // Stop polling if sync is complete (check both status and state fields)
+        if (status.status === 'completed' || status.status === 'failed' || 
+            status.state === 'COMPLETED' || status.state === 'DONE' || status.state === 'FAILED') {
           if (pollIntervalRef.current) {
             clearInterval(pollIntervalRef.current)
             pollIntervalRef.current = null
           }
           setSyncState(prev => ({ ...prev, isRunning: false }))
           if (status.status === 'completed') {
-            setShowSyncCompleteModal(true)
-            // Reload all data after sync completes
+            // Reload all data immediately after sync completes to show recent mails
             await loadInitialData()
+            // Keep log modal open to show completion
           } else if (status.status === 'failed') {
             setError(status.errors?.[0] || 'Sync failed')
+            // Keep log modal open to show errors
           }
         }
       } catch (err) {
+        consecutiveFailures++
         console.error('Sync status polling error:', err)
-        // Continue polling even on error
+        
+        // Exponential backoff: 2s, 4s, 8s, 16s, max 30s
+        currentBackoff = Math.min(currentBackoff * 2, 30000)
+        
+        // Stop after 10 consecutive failures
+        if (consecutiveFailures >= 10) {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
+          }
+          setError('Sync status polling failed. Please refresh the page to retry.')
+          setSyncState(prev => ({ ...prev, isRunning: false }))
+          return
+        }
+        
+        // Schedule next poll with backoff
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current)
+        }
+        pollIntervalRef.current = setTimeout(pollStatus, currentBackoff)
+      } finally {
+        inFlightRequest = false
       }
-    }, 2000) // Poll every 2 seconds
+    }
+
+    // Start polling immediately, then every 2 seconds while running
+    pollStatus()
+    pollIntervalRef.current = setInterval(pollStatus, 2000) // Poll every 2s
   }, [loadInitialData])
 
   const handleStartSync = async () => {
-    if (syncCheckRef.current) return // Prevent double execution
+    if (syncCheckRef.current || syncState.isRunning) {
+      // If already running, just show the modal
+      if (syncState.isRunning && syncState.jobId) {
+        setShowSyncLogModal(true)
+      }
+      return
+    }
     syncCheckRef.current = true
 
     try {
       setError(null)
+      // Show log modal IMMEDIATELY before making API call
+      setShowSyncLogModal(true)
+      setSyncState({
+        isRunning: true,
+        jobId: null,
+        progress: null,
+      })
+      
       const result = await gmailService.startSync()
       // Contract: { "sync_id": "uuid", "status": "started" }
       const syncId = result.sync_id || result.jobId
@@ -155,11 +250,17 @@ function Dashboard() {
       }
     } catch (err) {
       setError(err.message || 'Failed to start sync')
+      setSyncState(prev => ({ ...prev, isRunning: false }))
       if (err.message.includes('already running')) {
         // Try to get the existing sync ID
+        try {
         const status = await gmailService.getStatus()
         if (status.syncJobId) {
           startProgressPolling(status.syncJobId)
+            setShowSyncLogModal(true)
+          }
+        } catch (statusErr) {
+          console.error('Failed to get sync status:', statusErr)
         }
       }
     } finally {
@@ -591,6 +692,20 @@ function Dashboard() {
         <SyncCompleteModal
           progress={syncState.progress}
           onClose={() => setShowSyncCompleteModal(false)}
+        />
+      )}
+      
+      {showSyncLogModal && (
+        <SyncLogModal
+          progress={syncState.progress}
+          isRunning={syncState.isRunning}
+          onClose={() => {
+            setShowSyncLogModal(false)
+            // Only show completion modal if sync completed and log modal is closing
+            if (syncState.progress?.status === 'completed') {
+              setShowSyncCompleteModal(true)
+            }
+          }}
         />
       )}
     </div>

@@ -1,202 +1,257 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { IconRefresh, IconCheck, IconX } from './icons'
 import '../styles/SyncLogModal.css'
 
 export default function SyncLogModal({ progress, isRunning, onClose }) {
   const logContainerRef = useRef(null)
+  const emailsListRef = useRef(null)
+  const [showFullLogs, setShowFullLogs] = useState(false)
+  const [userScrolledLogs, setUserScrolledLogs] = useState(false)
+  const [userScrolledEmails, setUserScrolledEmails] = useState(false)
 
-  // Auto-scroll to bottom when new logs arrive
+  // Auto-scroll logs to bottom unless user scrolled up
   useEffect(() => {
-    if (logContainerRef.current) {
+    if (logContainerRef.current && !userScrolledLogs) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
     }
-  }, [progress])
+  }, [progress, userScrolledLogs])
+
+  // Auto-scroll emails list to top (newest entries) unless user scrolled
+  useEffect(() => {
+    if (emailsListRef.current && !userScrolledEmails) {
+      emailsListRef.current.scrollTop = 0
+    }
+  }, [progress, userScrolledEmails])
+
+  // Reset scroll detection when new entries arrive (if user hasn't scrolled)
+  const handleLogScroll = () => {
+    const container = logContainerRef.current
+    if (container) {
+      const isAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 10
+      if (isAtBottom) {
+        setUserScrolledLogs(false)
+      } else if (!userScrolledLogs) {
+        setUserScrolledLogs(true)
+      }
+    }
+  }
+
+  const handleEmailsScroll = () => {
+    const container = emailsListRef.current
+    if (container) {
+      const isAtTop = container.scrollTop <= 10
+      if (isAtTop) {
+        setUserScrolledEmails(false)
+      } else if (!userScrolledEmails) {
+        setUserScrolledEmails(true)
+      }
+    }
+  }
 
   if (!isRunning && !progress) return null
 
   const status = progress?.status || 'running'
   const totalEmails = progress?.total_emails || progress?.total_scanned || 0
-  const fetchedEmails = progress?.fetched_emails || progress?.total_fetched || 0
-  const classified = progress?.classified || {}
+  const fetchedEmails = progress?.emails_fetched || progress?.total_fetched || 0
+  const processedEmails = progress?.processed_emails || progress?.emails_fetched || fetchedEmails || 0
+  const classified = progress?.counts || progress?.classified || {}
   const skipped = progress?.skipped || 0
-
-  // Generate log entries
-  const logEntries = []
+  const applicationsFound = progress?.applications_found || 0
   
-  if (status === 'running') {
-    logEntries.push({
-      time: new Date(),
-      message: 'Starting Gmail sync...',
-      type: 'info'
-    })
-    
-    if (totalEmails > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `Scanning Gmail: Found ${totalEmails.toLocaleString()} total emails`,
-        type: 'info'
-      })
+  // Use real email entries from backend
+  const backendEmailEntries = progress?.email_entries || []
+  
+  // Calculate totals - use applications_found as primary source, fallback to sum of classified counts
+  const totalStored = applicationsFound > 0 
+    ? applicationsFound 
+    : Object.values(classified).reduce((sum, val) => sum + (val || 0), 0)
+  
+  // Use real logs from backend
+  const backendLogs = progress?.logs || []
+  
+  // Convert backend logs to display format (keep last 200)
+  const logEntries = backendLogs.slice(-200).map(log => ({
+    time: log.time ? new Date(log.time) : new Date(),
+    message: log.message || '',
+    type: log.type || 'info'
+  }))
+
+  // Format email entries for display - match image format: "Hire - [snippet] - [category]"
+  const formatEmailEntry = (entry) => {
+    const categoryMap = {
+      'APPLIED': { label: 'Applied', status: 'success', color: '#16a34a' },
+      'REJECTED': { label: 'Rejected', status: 'error', color: '#dc2626' },
+      'INTERVIEW': { label: 'Interview', status: 'info', color: '#3b82f6' },
+      'OFFER_ACCEPTED': { label: 'Accepted/Offer', status: 'success', color: '#16a34a' },
+      'GHOSTED': { label: 'Ghosted', status: 'warning', color: '#f59e0b' },
     }
     
-    if (fetchedEmails > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `Fetched ${fetchedEmails.toLocaleString()} emails for processing`,
-        type: 'info'
-      })
+    const categoryInfo = categoryMap[entry.category] || { 
+      label: entry.category || 'Other', 
+      status: 'info',
+      color: '#64748b'
     }
     
-    const candidateCount = Object.values(classified).reduce((sum, val) => sum + (val || 0), 0)
-    if (candidateCount > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `Identified ${candidateCount.toLocaleString()} job-related emails`,
-        type: 'info'
-      })
-    }
+    // Format as "Hire - [snippet] - [category]" to match image
+    const snippet = entry.snippet || entry.subject || 'No description'
+    const fullText = `Hire - ${snippet} - ${categoryInfo.label}`
     
-    if (classified.applied > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `✓ Classified ${classified.applied.toLocaleString()} as Applied`,
-        type: 'success'
-      })
+    return {
+      id: entry.id || Math.random(),
+      fullText,
+      snippet,
+      category: categoryInfo.label,
+      status: categoryInfo.status,
+      color: categoryInfo.color
     }
-    
-    if (classified.rejected > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `✓ Classified ${classified.rejected.toLocaleString()} as Rejected`,
-        type: 'success'
-      })
-    }
-    
-    if (classified.interview > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `✓ Classified ${classified.interview.toLocaleString()} as Interview`,
-        type: 'success'
-      })
-    }
-    
-    if (classified.offer > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `✓ Classified ${classified.offer.toLocaleString()} as Offer / Accepted`,
-        type: 'success'
-      })
-    }
-    
-    if (classified.ghosted > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `✓ Classified ${classified.ghosted.toLocaleString()} as Ghosted`,
-        type: 'success'
-      })
-    }
-    
-    if (skipped > 0) {
-      logEntries.push({
-        time: new Date(),
-        message: `Skipped ${skipped.toLocaleString()} emails (not job applications)`,
-        type: 'warning'
-      })
-    }
-  } else if (status === 'completed') {
-    logEntries.push({
-      time: new Date(),
-      message: '✓ Sync completed successfully!',
-      type: 'success'
-    })
-    logEntries.push({
-      time: new Date(),
-      message: `Total: ${fetchedEmails.toLocaleString()} emails processed, ${Object.values(classified).reduce((sum, val) => sum + (val || 0), 0).toLocaleString()} applications created`,
-      type: 'success'
-    })
-  } else if (status === 'failed') {
-    logEntries.push({
-      time: new Date(),
-      message: '✗ Sync failed. Please try again.',
-      type: 'error'
-    })
   }
 
+  const emailEntries = backendEmailEntries.map(formatEmailEntry)
+
   const formatTime = (date) => {
-    return date.toLocaleTimeString('en-US', {
-      hour12: false,
+    const dateObj = date instanceof Date ? date : new Date(date)
+    return dateObj.toLocaleTimeString('en-US', {
+      hour12: true,
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit'
     })
   }
 
+  // Determine status display
+  const statusTitle = status === 'completed' ? 'Complete' : status === 'failed' ? 'Failed' : 'Syncing...'
+  const showSummaryBox = status === 'completed' || status === 'running' || status === 'failed'
+  
+  // Calculate progress percentage for progress bar
+  // Use processed_emails vs total_emails for accurate progress
+  const progressPercentage = totalEmails > 0 
+    ? Math.min(100, Math.round((processedEmails / totalEmails) * 100))
+    : processedEmails > 0 
+    ? Math.min(50, Math.round((processedEmails / 100) * 50)) // Show partial progress if total unknown
+    : 0
+
   return (
     <div className="sync-log-modal-overlay" onClick={onClose}>
       <div className="sync-log-modal neo-card" onClick={(e) => e.stopPropagation()}>
-        <div className="sync-log-modal-header">
-          <div className="sync-log-modal-title">
-            {status === 'running' && <IconRefresh className="sync-log-spinning" />}
-            {status === 'completed' && <IconCheck className="sync-log-success" />}
-            {status === 'failed' && <IconX className="sync-log-error" />}
-            <h3>Gmail Sync {status === 'running' ? 'In Progress' : status === 'completed' ? 'Complete' : 'Failed'}</h3>
+        {/* Header with status */}
+        <div className="sync-log-modal-header-new">
+          <div className="sync-log-status-header">
+            {status === 'completed' && (
+              <div className="sync-log-status-icon-circle sync-log-icon-success-circle">
+                <IconCheck className="sync-log-status-icon" />
+              </div>
+            )}
+            {status === 'running' && <IconRefresh className="sync-log-status-icon sync-log-spinning" />}
+            {status === 'failed' && (
+              <div className="sync-log-status-icon-circle sync-log-icon-error-circle">
+                <IconX className="sync-log-status-icon" />
+              </div>
+            )}
+            <div className="sync-log-status-text">
+              <h2 className={status === 'completed' ? 'sync-log-complete' : status === 'failed' ? 'sync-log-failed' : ''}>
+                {statusTitle}
+              </h2>
+              {(status === 'completed' || status === 'running') && (
+                <p className="sync-log-subtitle">Please wait while we sync your data.</p>
+              )}
+              {status === 'failed' && (
+                <p className="sync-log-subtitle">Sync encountered an error. Please try again.</p>
+              )}
+            </div>
           </div>
           <button className="sync-log-modal-close" onClick={onClose} aria-label="Close">
             <IconX />
           </button>
         </div>
 
-        <div className="sync-log-modal-stats">
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Total Emails</span>
-            <span className="sync-log-stat-value">{totalEmails.toLocaleString()}</span>
+        {/* Summary Box - Show during sync and on completion */}
+        {showSummaryBox && (
+          <div className={`sync-log-summary-box ${status === 'failed' ? 'sync-log-summary-error' : ''}`}>
+            {status === 'completed' ? (
+              <>✓ {totalStored.toLocaleString()} emails stored</>
+            ) : status === 'failed' ? (
+              <>✗ Sync failed. Please try again.</>
+            ) : (
+              <div className="sync-log-progress-info">
+                <div>Processing...</div>
+                {totalEmails > 0 && (
+                  <div className="sync-log-progress-bar-container">
+                    <div className="sync-log-progress-bar">
+                      <div 
+                        className="sync-log-progress-bar-fill" 
+                        style={{ width: `${progressPercentage}%` }}
+                      />
+                    </div>
+                    <div className="sync-log-progress-text">
+                      {processedEmails} / {totalEmails} emails ({progressPercentage}%)
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Fetched</span>
-            <span className="sync-log-stat-value">{fetchedEmails.toLocaleString()}</span>
-          </div>
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Applied</span>
-            <span className="sync-log-stat-value">{classified.applied || 0}</span>
-          </div>
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Rejected</span>
-            <span className="sync-log-stat-value">{classified.rejected || 0}</span>
-          </div>
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Interview</span>
-            <span className="sync-log-stat-value">{classified.interview || 0}</span>
-          </div>
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Offer</span>
-            <span className="sync-log-stat-value">{classified.offer || 0}</span>
-          </div>
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Ghosted</span>
-            <span className="sync-log-stat-value">{classified.ghosted || 0}</span>
-          </div>
-          <div className="sync-log-stat">
-            <span className="sync-log-stat-label">Skipped</span>
-            <span className="sync-log-stat-value">{skipped.toLocaleString()}</span>
-          </div>
-        </div>
+        )}
 
-        <div className="sync-log-modal-content">
-          <h4>Sync Logs</h4>
-          <div className="sync-log-container" ref={logContainerRef}>
+        {/* Progress Section - Email List */}
+        {(status === 'running' || status === 'completed') && (
+          <div className="sync-log-progress-section">
+            <h3 className="sync-log-progress-title">
+              EMAILS BEING ADDED ({Math.max(processedEmails, emailEntries.length)} OF {totalStored || totalEmails || '...'})
+            </h3>
+            
+            {/* Individual Email Entries - Scrollable List */}
+            <div 
+              className="sync-log-emails-list" 
+              ref={emailsListRef}
+              onScroll={handleEmailsScroll}
+            >
+              {emailEntries.length > 0 ? (
+                emailEntries.map((entry, index) => (
+                  <div key={entry.id || index} className="sync-log-email-entry">
+                    <div 
+                      className="sync-log-email-dot" 
+                      style={{ backgroundColor: entry.color || '#16a34a' }}
+                    />
+                    <div className="sync-log-email-content">
+                      <div className="sync-log-email-text">{entry.fullText}</div>
+          </div>
+          </div>
+                ))
+              ) : (
+                <div className="sync-log-email-entry sync-log-processing">
+                  <div className="sync-log-email-dot sync-log-dot-info" />
+                  <div className="sync-log-email-content">
+                    <div className="sync-log-email-text">Processing emails...</div>
+          </div>
+          </div>
+              )}
+          </div>
+          </div>
+        )}
+
+        {/* Detailed Logs Section - Toggleable */}
+        {showFullLogs && (
+          <div className="sync-log-detailed-logs">
+            <h4>Detailed Sync Logs</h4>
+            <div 
+              className="sync-log-container" 
+              ref={logContainerRef}
+              onScroll={handleLogScroll}
+            >
             {logEntries.length === 0 ? (
-              <div className="sync-log-entry">
+                <div className="sync-log-entry sync-log-info">
                 <span className="sync-log-time">[{formatTime(new Date())}]</span>
                 <span className="sync-log-message">Initializing sync...</span>
               </div>
             ) : (
               logEntries.map((entry, index) => (
-                <div key={index} className={`sync-log-entry sync-log-${entry.type}`}>
+                  <div key={index} className={`sync-log-entry sync-log-${entry.type || 'info'}`}>
                   <span className="sync-log-time">[{formatTime(entry.time)}]</span>
                   <span className="sync-log-message">{entry.message}</span>
                 </div>
               ))
             )}
-            {status === 'running' && (
+              {status === 'running' && logEntries.length > 0 && (
               <div className="sync-log-entry sync-log-info">
                 <span className="sync-log-time">[{formatTime(new Date())}]</span>
                 <span className="sync-log-message">Processing... <span className="sync-log-dots">...</span></span>
@@ -204,17 +259,26 @@ export default function SyncLogModal({ progress, isRunning, onClose }) {
             )}
           </div>
         </div>
+        )}
 
+        {/* Actions */}
         <div className="sync-log-modal-actions">
-          {status === 'completed' || status === 'failed' ? (
-            <button type="button" className="sync-log-modal-btn sync-log-modal-btn-primary" onClick={onClose}>
-              Close
-            </button>
-          ) : (
-            <button type="button" className="sync-log-modal-btn sync-log-modal-btn-secondary" onClick={onClose}>
-              Close (Sync continues in background)
+          {logEntries.length > 0 && (
+            <button 
+              type="button" 
+              className="sync-log-modal-btn sync-log-modal-btn-logs" 
+              onClick={() => setShowFullLogs(!showFullLogs)}
+            >
+              &gt; {showFullLogs ? 'Hide' : 'View'} Full Logs
             </button>
           )}
+          <button 
+            type="button" 
+            className={`sync-log-modal-btn ${status === 'completed' || status === 'failed' ? 'sync-log-modal-btn-close' : 'sync-log-modal-btn-secondary'}`} 
+            onClick={onClose}
+          >
+            Close
+          </button>
         </div>
       </div>
     </div>

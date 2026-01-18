@@ -4,9 +4,16 @@ from fastapi.responses import JSONResponse, RedirectResponse
 import httpx
 import os
 import time
+import logging
 from datetime import datetime, timezone
 from app.routers import auth, gmail, export, resume
 from app.middleware.auth_middleware import verify_token
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 _health_start = time.time()
 

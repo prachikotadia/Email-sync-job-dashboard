@@ -1,8 +1,9 @@
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum, inspect
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum, inspect, JSON, text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 import uuid
 import enum
@@ -91,14 +92,78 @@ class SyncState(Base):
     # Relationships
     user = relationship("User", back_populates="sync_state")
 
+class SyncJobStatus(enum.Enum):
+    PENDING = "PENDING"
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    DONE = "DONE"
+    FAILED = "FAILED"
+    UNAVAILABLE = "UNAVAILABLE"
+    NOT_FOUND = "NOT_FOUND"
+
+class SyncJob(Base):
+    __tablename__ = "sync_jobs"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(SQLEnum(SyncJobStatus), nullable=False, default=SyncJobStatus.PENDING, index=True)
+    total_emails = Column(Integer, default=0)  # total_estimated
+    processed_emails = Column(Integer, default=0)  # processed_ok
+    processed_failed = Column(Integer, default=0)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    finished_at = Column(DateTime(timezone=True), nullable=True)  # When job completed/failed
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    error_message = Column(Text, nullable=True)  # last_error_message
+    error_code = Column(String, nullable=True)  # last_error_code (e.g., "REAUTH_REQUIRED", "RATE_LIMIT", etc.)
+    expires_at = Column(DateTime(timezone=True), index=True)  # TTL safety - default 24 hours
+    logs = Column(JSON, default=list)  # Store log entries as JSON array
+    email_entries = Column(JSON, default=list)  # Store email entries as JSON array
+    checkpoint = Column(JSON, nullable=True)  # Store pagination token, lastMessageInternalDate, etc.
+    current_phase = Column(String, nullable=True)  # e.g., "fetching_ids", "processing_messages", "completed"
+    current_page = Column(Integer, default=0)  # Current pagination page
+    
+    # Relationships
+    user = relationship("User")
+
 def init_db():
-    """Initialize database tables"""
-    # Check if schema migration is needed (users.id should be UUID, not integer)
+    """Initialize database tables with schema migration support"""
+    # Ensure all tables exist first
+    Base.metadata.create_all(bind=engine)
+    
+    # Refresh inspector after table creation
     inspector = inspect(engine)
     tables = inspector.get_table_names()
     
+    # Migrate sync_jobs table if needed (add missing columns)
+    if 'sync_jobs' in tables:
+        existing_columns = {col['name'] for col in inspector.get_columns('sync_jobs')}
+        required_columns = {
+            'processed_failed', 'error_code', 'checkpoint', 
+            'finished_at', 'current_phase', 'current_page'
+        }
+        missing_columns = required_columns - existing_columns
+        
+        if missing_columns:
+            logger.info(f"Migrating sync_jobs table: adding columns {missing_columns}")
+            with engine.begin() as conn:
+                # Use ALTER TABLE to add missing columns
+                if 'processed_failed' in missing_columns:
+                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS processed_failed INTEGER DEFAULT 0"))
+                if 'error_code' in missing_columns:
+                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS error_code VARCHAR"))
+                if 'checkpoint' in missing_columns:
+                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS checkpoint JSON"))
+                if 'finished_at' in missing_columns:
+                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP WITH TIME ZONE"))
+                if 'current_phase' in missing_columns:
+                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS current_phase VARCHAR"))
+                if 'current_page' in missing_columns:
+                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS current_page INTEGER DEFAULT 0"))
+            logger.info("sync_jobs table migration completed")
+    
+    # Check if schema migration is needed (users.id should be UUID, not integer)
     if 'users' in tables:
-        # Check if users.id is integer (wrong) or UUID (correct)
         columns = inspector.get_columns('users')
         users_id_col = next((col for col in columns if col['name'] == 'id'), None)
         
@@ -112,15 +177,6 @@ def init_db():
                 Base.metadata.drop_all(bind=engine)
                 Base.metadata.create_all(bind=engine)
                 logger.info("Database schema migrated successfully")
-            else:
-                # Schema is correct, just ensure all tables exist
-                Base.metadata.create_all(bind=engine)
-        else:
-            # Column doesn't exist, create tables
-            Base.metadata.create_all(bind=engine)
-    else:
-        # Tables don't exist, create them
-        Base.metadata.create_all(bind=engine)
 
 def get_db():
     """Get database session"""

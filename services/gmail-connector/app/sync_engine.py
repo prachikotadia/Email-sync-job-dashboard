@@ -93,8 +93,11 @@ class SyncEngine:
             
             logger.info(f"Stage 1: Found {candidate_job_emails} candidate job emails")
             
-            # Stage 2: High Precision - Classify and save
-            for message in candidate_emails:
+            # Stage 2: High Precision - Classify and save (batch processing for speed)
+            batch_size = 10  # Process and yield every 10 emails for better performance
+            batch_count = 0
+            
+            for idx, message in enumerate(candidate_emails):
                 try:
                     # Extract application data
                     application_data = self._extract_application(message)
@@ -123,14 +126,29 @@ class SyncEngine:
                     if category_upper in classified:
                         classified[category_upper] += 1
                     
-                    # Yield progress update
-                    yield {
-                        "total_scanned": total_scanned,
-                        "total_fetched": total_fetched,
-                        "candidate_job_emails": candidate_job_emails,
-                        "classified": classified.copy(),
-                        "skipped": skipped,
+                    # Yield email entry for UI display
+                    email_entry = {
+                        "id": message.get('id'),
+                        "company": application_data.get("company_name", "Unknown Company"),
+                        "snippet": application_data.get("snippet", "")[:100],  # Truncate snippet
+                        "category": category_upper,
+                        "subject": application_data.get("subject", "")[:80],  # Truncate subject
                     }
+                    
+                    batch_count += 1
+                    
+                    # Yield progress update every batch_size or at the end
+                    if batch_count >= batch_size or idx == len(candidate_emails) - 1:
+                        yield {
+                            "total_scanned": total_scanned,
+                            "total_fetched": total_fetched,
+                            "candidate_job_emails": candidate_job_emails,
+                            "classified": classified.copy(),
+                            "skipped": skipped,
+                            "email_entry": email_entry if batch_count >= batch_size else None,  # Include latest email entry
+                        }
+                        batch_count = 0
+                        
                 except Exception as e:
                     logger.warning(f"Error processing message {message.get('id')}: {e}")
                     skipped += 1
@@ -227,21 +245,15 @@ class SyncEngine:
         except:
             received_at = datetime.now(timezone.utc)
         
-        # Extract company and role using company extractor
-        company = self.company_extractor.extract(subject, from_email, message.get('snippet', ''))
+        # Extract company and role using company extractor (pass full message for HTML parsing)
+        company, source, confidence = self.company_extractor.extract(
+            message, subject, from_email, message.get('snippet', '')
+        )
         role = self.company_extractor.extract_role(subject, message.get('snippet', ''))
         
-        # Ensure company is never None - use fallback
+        # Company is guaranteed to never be None (extractor always returns a value)
         if not company:
-            # Fallback: extract from email domain
-            if '@' in from_email:
-                domain = from_email.split('@')[1].lower()
-                if domain not in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com']:
-                    company = domain.split('.')[0].capitalize()
-                else:
-                    company = 'Unknown Company'
-            else:
-                company = 'Unknown Company'
+            company = 'Unknown Company'  # Safety fallback (should never happen)
         
         return {
             "company_name": company,

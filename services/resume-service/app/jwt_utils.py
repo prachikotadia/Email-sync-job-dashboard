@@ -4,7 +4,6 @@ Validates JWT tokens from auth service
 """
 from jose import jwt, JWTError
 import os
-import httpx
 import logging
 
 logger = logging.getLogger(__name__)
