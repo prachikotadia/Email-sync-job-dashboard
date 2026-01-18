@@ -1,84 +1,154 @@
-# Step 3: Docker Compose as the single entry point.
-# Six containers: frontend, api-gateway, auth-service, gmail-connector-service, classifier-service, db.
-# One command: docker-compose up --build
-# Zero local installs; zero OS-specific scripts.
-# See SERVICE_LAYOUT.md for boundaries and allowed calls.
+# ============================================================================
+# STEP 3: DOCKER COMPOSE AS THE SINGLE ENTRY POINT
+# ============================================================================
+#
+# One docker-compose.yml - Zero local installs - Zero OS-specific scripts
+#
+# Usage:
+#   docker-compose up --build        # Build and start all services
+#   docker-compose up -d              # Start in detached mode
+#   docker-compose down               # Stop all services
+#   docker-compose logs -f <service>  # View logs
+#
+# Services:
+#   - frontend (React SPA on nginx)
+#   - api-gateway (FastAPI proxy/router)
+#   - auth-service (Google OAuth + JWT)
+#   - gmail-connector-service (Gmail API integration)
+#   - classifier-service (Email classification)
+#   - db (PostgreSQL database)
+#
+# See SERVICE_LAYOUT.md for service boundaries and allowed calls.
+# ============================================================================
+
+version: '3.8'
 
 services:
+  # --------------------------------------------------------------------------
+  # Frontend: React SPA served by nginx
+  # --------------------------------------------------------------------------
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         - VITE_API_URL=http://localhost:8000
+    container_name: jobpulse-frontend
     ports:
       - "3000:80"
     depends_on:
-      - api-gateway
+      api-gateway:
+        condition: service_started
     networks:
       - job-tracker-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # --------------------------------------------------------------------------
+  # API Gateway: Single HTTP entry point for frontend
+  # --------------------------------------------------------------------------
   api-gateway:
     build:
       context: ./services/api-gateway
       dockerfile: Dockerfile
+    container_name: jobpulse-api-gateway
     ports:
       - "8000:8000"
     environment:
       - AUTH_SERVICE_URL=http://auth-service:8001
       - GMAIL_SERVICE_URL=http://gmail-connector-service:8002
-      - CLASSIFIER_SERVICE_URL=http://classifier-service:8003
-      - JWT_SECRET=${JWT_SECRET}
+      - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
+      - FRONTEND_URL=http://localhost:3000
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - JWT_ALGORITHM=HS256
     depends_on:
-      - auth-service
-      - gmail-connector-service
-      - classifier-service
+      auth-service:
+        condition: service_started
+      gmail-connector-service:
+        condition: service_started
+      classifier-service:
+        condition: service_started
     networks:
       - job-tracker-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # --------------------------------------------------------------------------
+  # Auth Service: Google OAuth + JWT token management
+  # --------------------------------------------------------------------------
   auth-service:
     build:
       context: ./services/auth-service
       dockerfile: Dockerfile
+    container_name: jobpulse-auth-service
     ports:
       - "8001:8001"
     environment:
-      - JWT_SECRET=${JWT_SECRET}
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - JWT_ALGORITHM=HS256
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - REDIRECT_URI=${REDIRECT_URI}
+      - REDIRECT_URI=${REDIRECT_URI:-http://localhost:8000/api/auth/callback}
       - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
     depends_on:
       db:
         condition: service_healthy
     networks:
       - job-tracker-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # --------------------------------------------------------------------------
+  # Gmail Connector Service: Raw Gmail API integration
+  # --------------------------------------------------------------------------
   gmail-connector-service:
     build:
       context: ./services/gmail-connector
       dockerfile: Dockerfile
+    container_name: jobpulse-gmail-connector
     ports:
       - "8002:8002"
     environment:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - REDIRECT_URI=${REDIRECT_URI}
+      - REDIRECT_URI=${REDIRECT_URI:-http://localhost:8000/api/auth/callback}
       - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
-      - CLASSIFIER_SERVICE_URL=http://classifier-service:8003
+      - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
       - GHOSTED_DAYS=${GHOSTED_DAYS:-21}
     depends_on:
       db:
         condition: service_healthy
+      classifier-service:
+        condition: service_started
     networks:
       - job-tracker-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import requests; requests.get('http://localhost:8002/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # --------------------------------------------------------------------------
+  # Classifier Service: Email classification pipeline
+  # --------------------------------------------------------------------------
   classifier-service:
     build:
       context: ./services/classifier-service
       dockerfile: Dockerfile
+    container_name: jobpulse-classifier-service
     ports:
       - "8003:8003"
     environment:
@@ -88,9 +158,19 @@ services:
         condition: service_healthy
     networks:
       - job-tracker-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import requests; requests.get('http://localhost:8003/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # --------------------------------------------------------------------------
+  # Database: PostgreSQL for persistent storage
+  # --------------------------------------------------------------------------
   db:
     image: postgres:15-alpine
+    container_name: jobpulse-db
     environment:
       - POSTGRES_USER=${DB_USER:-jobpulse}
       - POSTGRES_PASSWORD=${DB_PASSWORD:-jobpulse_password}
@@ -98,19 +178,27 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432" # Host port 5433 -> Container port 5432 (to avoid conflict with local PostgreSQL)
+    networks:
+      - job-tracker-network
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-jobpulse} -d ${DB_NAME:-jobpulse_db}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER:-jobpulse} -d ${DB_NAME:-jobpulse_db}" ]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - job-tracker-network
+      start_period: 10s
 
+# --------------------------------------------------------------------------
+# Volumes: Persistent data storage
+# --------------------------------------------------------------------------
 volumes:
   postgres-data:
     driver: local
 
+# --------------------------------------------------------------------------
+# Networks: Service communication
+# --------------------------------------------------------------------------
 networks:
   job-tracker-network:
     driver: bridge

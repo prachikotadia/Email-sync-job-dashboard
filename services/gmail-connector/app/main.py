@@ -7,14 +7,16 @@ from app.gmail_client import GmailClient
 from app.sync_engine import SyncEngine
 from app.classifier import Classifier
 from app.company_extractor import CompanyExtractor
-from app.database import get_db, init_db, engine, User, Application, SyncState
+from app.database import get_db, init_db, engine, User, Application, SyncState, OAuthToken
 from app.ghosted_detector import GhostedDetector
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 import os
 import uuid
 import logging
 import time
 import httpx
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -56,6 +58,16 @@ class SyncStartRequest(BaseModel):
 
 class ClearRequest(BaseModel):
     user_id: str
+
+class OAuthTokenStoreRequest(BaseModel):
+    user_email: str
+    access_token: str
+    refresh_token: Optional[str] = None
+    token_uri: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    scopes: Optional[list] = None
+    expires_at: Optional[str] = None
 
 @app.get("/status")
 async def get_status(user_id: str = Query(...), db: Session = Depends(get_db)):
@@ -170,11 +182,20 @@ async def run_sync(job_id: str, user_id: int, user_email: str, db: Session):
         sync_jobs[job_id]["status"] = "running"
         logger.info(f"Starting sync for user {user_id} (job {job_id})")
         
-        # Get user's OAuth tokens (in production, fetch from secure storage)
-        # For now, this is a placeholder
+        # Get user's OAuth tokens from database
+        oauth_token = db.query(OAuthToken).filter(OAuthToken.user_id == user_id).first()
+        if not oauth_token:
+            raise Exception(f"No OAuth tokens found for user {user_email}. Please re-authenticate.")
         
-        # Initialize Gmail client
-        gmail_client = GmailClient(user_id, user_email)
+        # Check if token is expired and refresh if needed
+        if oauth_token.expires_at and oauth_token.expires_at < datetime.utcnow():
+            if not oauth_token.refresh_token:
+                raise Exception("Access token expired and no refresh token available. Please re-authenticate.")
+            # TODO: Implement token refresh logic here
+            logger.warning(f"Access token expired for user {user_email}, but refresh not yet implemented")
+        
+        # Initialize Gmail client with OAuth tokens
+        gmail_client = GmailClient(user_id, user_email, oauth_token)
         
         # Validate email ownership
         gmail_email = await gmail_client.get_user_email()
@@ -386,6 +407,9 @@ async def clear_user_data(request: ClearRequest, db: Session = Depends(get_db)):
         # Delete all applications
         db.query(Application).filter(Application.user_id == user_id).delete()
         
+        # Delete OAuth tokens
+        db.query(OAuthToken).filter(OAuthToken.user_id == user_id).delete()
+        
         # Clear sync state
         sync_state = db.query(SyncState).filter(SyncState.user_id == user_id).first()
         if sync_state:
@@ -412,6 +436,68 @@ async def clear_user_data(request: ClearRequest, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to clear data: {str(e)}")
 
+@app.post("/oauth/store")
+async def store_oauth_tokens(request: OAuthTokenStoreRequest, db: Session = Depends(get_db)):
+    """
+    Store OAuth tokens for a user (called by auth-service after OAuth callback)
+    """
+    try:
+        # Get or create user
+        user = db.query(User).filter(User.email == request.user_email).first()
+        if not user:
+            user = User(email=request.user_email)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        
+        # Parse expires_at
+        expires_at = None
+        if request.expires_at:
+            try:
+                expires_at = datetime.fromisoformat(request.expires_at.replace('Z', '+00:00'))
+            except:
+                expires_at = datetime.utcnow() + timedelta(hours=1)
+        
+        # Store or update OAuth tokens
+        oauth_token = db.query(OAuthToken).filter(OAuthToken.user_id == user.id).first()
+        if oauth_token:
+            # Update existing tokens
+            oauth_token.access_token = request.access_token
+            if request.refresh_token:
+                oauth_token.refresh_token = request.refresh_token
+            if request.token_uri:
+                oauth_token.token_uri = request.token_uri
+            if request.client_id:
+                oauth_token.client_id = request.client_id
+            if request.client_secret:
+                oauth_token.client_secret = request.client_secret
+            if request.scopes:
+                oauth_token.scopes = json.dumps(request.scopes)
+            if expires_at:
+                oauth_token.expires_at = expires_at
+            oauth_token.updated_at = datetime.utcnow()
+        else:
+            # Create new tokens
+            oauth_token = OAuthToken(
+                user_id=user.id,
+                access_token=request.access_token,
+                refresh_token=request.refresh_token,
+                token_uri=request.token_uri,
+                client_id=request.client_id,
+                client_secret=request.client_secret,
+                scopes=json.dumps(request.scopes or []),
+                expires_at=expires_at,
+            )
+            db.add(oauth_token)
+        
+        db.commit()
+        logger.info(f"Stored OAuth tokens for user {user.email}")
+        return {"message": "OAuth tokens stored successfully"}
+    except Exception as e:
+        logger.error(f"Error storing OAuth tokens: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to store OAuth tokens: {str(e)}")
+
 @app.post("/ghosted/check")
 async def check_ghosted(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
@@ -431,7 +517,7 @@ async def health():
         database = {"status": "error", "message": str(e)}
 
     # Classifier service
-    classifier_url = os.getenv("CLASSIFIER_SERVICE_URL", "http://classifier-service:8003")
+    classifier_url = os.getenv("CLASSIFIER_SERVICE_URL", "http://host.docker.internal:8003")
     try:
         async with httpx.AsyncClient(timeout=2.0) as c:
             r = await c.get(f"{classifier_url.rstrip('/')}/health")

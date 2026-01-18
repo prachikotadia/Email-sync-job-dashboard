@@ -21,6 +21,25 @@ class User(Base):
     # Relationships
     applications = relationship("Application", back_populates="user", cascade="all, delete-orphan")
     sync_state = relationship("SyncState", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    oauth_tokens = relationship("OAuthToken", back_populates="user", uselist=False, cascade="all, delete-orphan")
+
+class OAuthToken(Base):
+    __tablename__ = "oauth_tokens"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    access_token = Column(Text, nullable=False)  # Encrypted in production
+    refresh_token = Column(Text)  # Encrypted in production
+    token_uri = Column(String)
+    client_id = Column(String)
+    client_secret = Column(String)
+    scopes = Column(Text)  # JSON array of scopes
+    expires_at = Column(DateTime)  # When access_token expires
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User", back_populates="oauth_tokens")
 
 class Application(Base):
     __tablename__ = "applications"
