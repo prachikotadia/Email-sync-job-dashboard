@@ -62,6 +62,7 @@ services:
       - AUTH_SERVICE_URL=http://auth-service:8001
       - GMAIL_SERVICE_URL=http://gmail-connector-service:8002
       - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
+      - RESUME_SERVICE_URL=http://resume-service:8004
       - FRONTEND_URL=http://localhost:3000
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - JWT_ALGORITHM=HS256
@@ -71,6 +72,8 @@ services:
       gmail-connector-service:
         condition: service_started
       classifier-service:
+        condition: service_started
+      resume-service:
         condition: service_started
     networks:
       - job-tracker-network
@@ -164,6 +167,26 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # --------------------------------------------------------------------------
+  # Resume Service: Resume management and export
+  # --------------------------------------------------------------------------
+  resume-service:
+    build:
+      context: ./services/resume-service
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=http://auth-service:8001
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - job-tracker-network
 
   # --------------------------------------------------------------------------
   # Database: PostgreSQL for persistent storage

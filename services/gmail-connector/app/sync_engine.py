@@ -44,11 +44,11 @@ class SyncEngine:
         total_fetched = 0
         candidate_job_emails = 0
         classified = {
-            "applied": 0,
-            "rejected": 0,
-            "interview": 0,
-            "offer": 0,
-            "ghosted": 0,
+            "APPLIED": 0,
+            "REJECTED": 0,
+            "INTERVIEW": 0,
+            "OFFER_ACCEPTED": 0,
+            "GHOSTED": 0,
         }
         skipped = 0
         
@@ -102,12 +102,18 @@ class SyncEngine:
                         skipped += 1
                         continue
                     
-                    # Save to database
-                    self._save_application(user_id, message.get('id'), application_data, category)
+                    # Get thread ID from message
+                    thread_id = message.get('threadId')
                     
-                    # Update classified counts
-                    if category in classified:
-                        classified[category] += 1
+                    # Save to database (category will be converted to uppercase in _save_application)
+                    self._save_application(user_id, message.get('id'), application_data, category, thread_id)
+                    
+                    # Update classified counts (category is already uppercase from classifier or will be normalized)
+                    category_upper = category.upper()
+                    if category_upper == "OFFER":
+                        category_upper = "OFFER_ACCEPTED"
+                    if category_upper in classified:
+                        classified[category_upper] += 1
                     
                     # Yield progress update
                     yield {
@@ -124,9 +130,9 @@ class SyncEngine:
             
             logger.info(
                 f"Fetched: {total_fetched} emails. Job-related candidates: {candidate_job_emails}. "
-                f"Applied: {classified['applied']}, Rejected: {classified['rejected']}, "
-                f"Interview: {classified['interview']}, Offer: {classified['offer']}, "
-                f"Ghosted: {classified['ghosted']}. Skipped: {skipped}."
+                f"APPLIED: {classified['APPLIED']}, REJECTED: {classified['REJECTED']}, "
+                f"INTERVIEW: {classified['INTERVIEW']}, OFFER_ACCEPTED: {classified['OFFER_ACCEPTED']}, "
+                f"GHOSTED: {classified['GHOSTED']}. Skipped: {skipped}."
             )
             
         except Exception as e:
@@ -203,19 +209,31 @@ class SyncEngine:
             elif name == 'date':
                 date_str = value
         
-        # Parse date
+        # Parse date (with timezone)
         try:
             from email.utils import parsedate_to_datetime
-            received_at = parsedate_to_datetime(date_str) if date_str else datetime.utcnow()
+            received_at = parsedate_to_datetime(date_str) if date_str else datetime.now(timezone.utc)
+            # Ensure timezone-aware
+            if received_at.tzinfo is None:
+                received_at = received_at.replace(tzinfo=timezone.utc)
         except:
-            received_at = datetime.utcnow()
+            received_at = datetime.now(timezone.utc)
         
         # Extract company and role using company extractor
         company = self.company_extractor.extract(subject, from_email, message.get('snippet', ''))
         role = self.company_extractor.extract_role(subject, message.get('snippet', ''))
         
+        # Ensure company is never None - use fallback
         if not company:
-            return None
+            # Fallback: extract from email domain
+            if '@' in from_email:
+                domain = from_email.split('@')[1].lower()
+                if domain not in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com']:
+                    company = domain.split('.')[0].capitalize()
+                else:
+                    company = 'Unknown Company'
+            else:
+                company = 'Unknown Company'
         
         return {
             "company_name": company,
@@ -226,16 +244,79 @@ class SyncEngine:
             "snippet": message.get('snippet', ''),
         }
     
+    def _generate_gmail_web_url(self, message_id: str) -> str:
+        """
+        Generate Gmail web URL for a message
+        Format: https://mail.google.com/mail/u/0/#inbox/{message_id}
+        """
+        return f"https://mail.google.com/mail/u/0/#inbox/{message_id}"
+
+    def _extract_company_domain(self, from_email: str) -> str:
+        """
+        Extract company domain from email address
+        """
+        if '@' not in from_email:
+            return None
+        domain = from_email.split('@')[1].lower()
+        # Filter out common email providers
+        if domain in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com']:
+            return None
+        return domain
+
     def _save_application(
         self,
-        user_id: int,
+        user_id,  # Can be UUID or int (for backward compatibility during migration)
         gmail_message_id: str,
         application_data: Dict,
-        category: str
+        category: str,
+        thread_id: str = None
     ):
         """
         Save application to database (upsert)
+        Ensures company_name is never null
+        Category must be uppercase: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED
+        Generates gmail_web_url and extracts company_domain
         """
+        # Ensure category is uppercase
+        category_upper = category.upper() if category != "skip" else None
+        if category_upper == "OFFER":
+            category_upper = "OFFER_ACCEPTED"  # Normalize offer to OFFER_ACCEPTED
+        
+        if not category_upper or category_upper not in ["APPLIED", "REJECTED", "INTERVIEW", "OFFER_ACCEPTED", "GHOSTED"]:
+            logger.warning(f"Invalid category: {category}, skipping")
+            return
+        
+        # Ensure company_name is never null - use fallback
+        company_name = application_data.get("company_name")
+        if not company_name or company_name.strip() == '':
+            # Fallback extraction from email domain
+            from_email = application_data.get("from_email", "")
+            if '@' in from_email:
+                domain = from_email.split('@')[1].lower()
+                # Remove common email providers
+                if domain not in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com']:
+                    company_name = domain.split('.')[0].capitalize()
+                else:
+                    company_name = 'Unknown Company'
+            else:
+                company_name = 'Unknown Company'
+        
+        # Extract company domain
+        from_email = application_data.get("from_email", "")
+        company_domain = self._extract_company_domain(from_email)
+        
+        # Ensure subject is never null
+        subject = application_data.get("subject", "")
+        if not subject or subject.strip() == '':
+            subject = "No Subject"
+        
+        # Generate Gmail web URL
+        gmail_web_url = self._generate_gmail_web_url(gmail_message_id)
+        
+        # Ensure thread_id is never null
+        if not thread_id:
+            thread_id = gmail_message_id  # Use message_id as fallback
+        
         # Check if application already exists
         existing = self.db.query(Application).filter(
             Application.gmail_message_id == gmail_message_id
@@ -243,24 +324,30 @@ class SyncEngine:
         
         if existing:
             # Update existing
-            existing.company_name = application_data["company_name"]
+            existing.company_name = company_name
+            existing.company_domain = company_domain
             existing.role = application_data.get("role")
-            existing.category = category
-            existing.subject = application_data.get("subject")
-            existing.from_email = application_data.get("from_email")
+            existing.category = category_upper
+            existing.subject = subject
+            existing.from_email = from_email
             existing.received_at = application_data.get("received_at")
             existing.snippet = application_data.get("snippet")
-            existing.last_updated = datetime.utcnow()
+            existing.gmail_thread_id = thread_id
+            existing.gmail_web_url = gmail_web_url
+            existing.last_updated = datetime.now(timezone.utc)
         else:
             # Create new
             application = Application(
                 user_id=user_id,
                 gmail_message_id=gmail_message_id,
-                company_name=application_data["company_name"],
+                gmail_thread_id=thread_id,
+                gmail_web_url=gmail_web_url,
+                company_name=company_name,
+                company_domain=company_domain,
                 role=application_data.get("role"),
-                category=category,
-                subject=application_data.get("subject"),
-                from_email=application_data.get("from_email"),
+                category=category_upper,
+                subject=subject,
+                from_email=from_email,
                 received_at=application_data.get("received_at"),
                 snippet=application_data.get("snippet"),
             )

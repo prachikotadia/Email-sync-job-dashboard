@@ -36,32 +36,33 @@ class Classifier:
 
     def classify(self, application: Dict) -> str:
         """
-        Stage 2: High Precision. Returns exactly ONE of: applied, rejected, interview, offer, or "skip".
+        Stage 2: High Precision. Returns exactly ONE of: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, or "skip".
+        Categories are UPPERCASE as per schema.
         Never assign multiple categories; never invent categories.
         """
         subject = application.get("subject", "").lower()
         snippet = application.get("snippet", "").lower()
         text = f"{subject} {snippet}"
 
-        # 1. Offer / Accepted (most specific)
+        # 1. Offer / Accepted (most specific) -> OFFER_ACCEPTED
         for keyword in self.keywords["offer"]:
             if keyword in text:
-                return "offer"
+                return "OFFER_ACCEPTED"
 
-        # 2. Rejected
+        # 2. Rejected -> REJECTED
         for keyword in self.keywords["rejected"]:
             if keyword in text:
-                return "rejected"
+                return "REJECTED"
 
-        # 3. Interview
+        # 3. Interview -> INTERVIEW
         for keyword in self.keywords["interview"]:
             if keyword in text:
-                return "interview"
+                return "INTERVIEW"
 
-        # 4. Applied
+        # 4. Applied -> APPLIED
         for keyword in self.keywords["applied"]:
             if keyword in text:
-                return "applied"
+                return "APPLIED"
 
         logger.debug(f"Uncertain classification for: {subject[:50]}")
         return "skip"

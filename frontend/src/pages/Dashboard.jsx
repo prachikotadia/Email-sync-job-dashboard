@@ -1,15 +1,39 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import { useProfileImage } from '../context/ProfileImageContext'
+import { useProfileLinks } from '../context/ProfileLinksContext'
 import { gmailService } from '../services/gmailService'
 import SyncCompleteModal from '../components/SyncCompleteModal'
-import { IconRocket, IconRefresh, IconPapers, IconCalendar, IconCheck, IconCrown, IconInfo } from '../components/icons'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, LabelList, Cell } from 'recharts'
+import { 
+  IconRocket, 
+  IconRefresh, 
+  IconPapers, 
+  IconCalendar, 
+  IconCheck, 
+  IconCrown, 
+  IconInfo,
+  IconChart,
+  IconActivity,
+  IconArrowRight,
+  IconBriefcase,
+  IconUser,
+  IconMail,
+  IconTrendingUp,
+  IconLinkedIn,
+  IconGithub,
+  IconLink,
+  IconGlobe
+} from '../components/icons'
 import { MOCK_APPLICATIONS } from '../mock/applications.mock'
-import { MOCK_DASHBOARD_STATS } from '../mock/dashboard.mock'
+import { MOCK_DASHBOARD_STATS, MOCK_CHART_DATA } from '../mock/dashboard.mock'
 import '../styles/Dashboard.css'
 
 function Dashboard() {
   const { user, isGuest } = useAuth()
+  const { profileImage } = useProfileImage()
+  const { links } = useProfileLinks()
   const [gmailStatus, setGmailStatus] = useState(null)
   const [syncState, setSyncState] = useState({
     isRunning: false,
@@ -168,146 +192,384 @@ function Dashboard() {
     )
   }
 
-  const total = stats?.total ?? 0
-  const active = stats?.applied ?? 0
-  const interviews = stats?.interview ?? 0
-  const offers = stats?.offer ?? 0
+  const total = stats?.total ?? MOCK_DASHBOARD_STATS.total
+  const active = stats?.applied ?? MOCK_DASHBOARD_STATS.applied
+  const interviews = stats?.interview ?? MOCK_DASHBOARD_STATS.interview
+  const offers = stats?.offer ?? MOCK_DASHBOARD_STATS.offer
   const recentApps = applications.slice(0, 5)
 
+  // Format data for Recharts BarChart
   const chartData = [
-    { key: 'applied', label: 'Applied', value: stats?.applied ?? 0 },
-    { key: 'interview', label: 'Interview', value: stats?.interview ?? 0 },
-    { key: 'rejected', label: 'Rejected', value: stats?.rejected ?? 0 },
-    { key: 'offer', label: 'Offer / Accepted', value: stats?.offer ?? 0 },
-    { key: 'ghosted', label: 'Ghosted', value: stats?.ghosted ?? 0 },
+    { name: 'Applied', value: stats?.applied ?? MOCK_CHART_DATA.applied, color: '#7c3aed' },
+    { name: 'Interview', value: stats?.interview ?? MOCK_CHART_DATA.interview, color: '#2563eb' },
+    { name: 'Rejected', value: stats?.rejected ?? MOCK_CHART_DATA.rejected, color: '#dc2626' },
+    { name: 'Offer / Accepted', value: stats?.offer ?? MOCK_CHART_DATA.offer, color: '#16a34a' },
+    { name: 'Ghosted', value: stats?.ghosted ?? MOCK_CHART_DATA.ghosted, color: '#64748b' },
   ]
-  const maxChartVal = Math.max(...chartData.map((d) => d.value), 1)
-  const yTicks = [maxChartVal, Math.ceil((3 * maxChartVal) / 4), Math.ceil(maxChartVal / 2), Math.ceil(maxChartVal / 4), 0]
+  
+  // Calculate dynamic Y-axis max with proper rounding
+  const dataMax = Math.max(...chartData.map((d) => d.value), 1)
+  
+  // Round up to clean step (50 for small numbers, 100 for larger)
+  const step = dataMax < 200 ? 50 : 100
+  const dynamicMax = Math.ceil(dataMax / step) * step
+  
+  // Custom label renderer for values above bars
+  const renderCustomLabel = (props) => {
+    const { x, y, width, value } = props
+    if (!value || value === 0) return null
+    return (
+      <text
+        x={x + width / 2}
+        y={y - 8}
+        fill="var(--text)"
+        textAnchor="middle"
+        fontSize="0.875rem"
+        fontWeight="700"
+        style={{ textShadow: '0 1px 3px rgba(0, 0, 0, 0.4)' }}
+      >
+        {value.toLocaleString()}
+      </text>
+    )
+  }
 
   return (
-    <div className="dashboard">
+    <div className="dashboard-professional">
       {isGuest && (
-        <div className="demo-banner neo-card">
+        <div className="demo-banner neo-card animate-fade-in">
           <IconInfo />
           <span>Demo Mode – Backend Disconnected</span>
         </div>
       )}
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && <div className="error-banner animate-slide-down">{error}</div>}
 
-      <div className="dashboard-stats">
-        <div className="stat-card neo-card">
-          <IconPapers className="stat-icon stat-icon-neutral" />
-          <span className="stat-num">{(total || 0).toLocaleString()}</span>
-          <span className="stat-label">TOTAL APPLICATIONS</span>
+      {/* Professional Header Section */}
+      <div className="dashboard-header-section">
+        <div className="dashboard-title-area">
+          <h1 className="dashboard-main-title">Dashboard</h1>
+          <p className="dashboard-subtitle">Track your job application pipeline</p>
         </div>
-        <div className="stat-card neo-card">
-          <IconPapers className="stat-icon stat-icon-blue" />
-          <span className="stat-num">{(active || 0).toLocaleString()}</span>
-          <span className="stat-label">ACTIVE</span>
+        {!isGuest && (
+          <div className="dashboard-actions">
+            <button
+              type="button"
+              className="dashboard-action-btn"
+              onClick={handleStartSync}
+              disabled={syncState.isRunning}
+            >
+              <IconRefresh className={syncState.isRunning ? 'spinning' : ''} />
+              <span>{syncState.isRunning ? 'Syncing...' : 'Sync Now'}</span>
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Stats Grid - Perfect 4-Column Layout */}
+      <div className="dashboard-stats-perfect">
+        <div className="stat-card-perfect stat-card-primary animate-stat-card" style={{ animationDelay: '0ms' }}>
+          <div className="stat-card-glow" />
+          <div className="stat-card-header">
+            <div className="stat-icon-container">
+              <IconPapers className="stat-icon-main" />
+            </div>
+            <div className="stat-change-badge">+12%</div>
+          </div>
+          <div className="stat-card-body">
+            <div className="stat-number-primary">{(total || 0).toLocaleString()}</div>
+            <div className="stat-label-primary">Total Applications</div>
+          </div>
         </div>
-        <div className="stat-card neo-card">
-          <IconCalendar className="stat-icon stat-icon-yellow" />
-          <span className="stat-num">{(interviews || 0).toLocaleString()}</span>
-          <span className="stat-label">INTERVIEWS</span>
+
+        <div className="stat-card-perfect stat-card-secondary animate-stat-card" style={{ animationDelay: '100ms' }}>
+          <div className="stat-card-glow" />
+          <div className="stat-card-header">
+            <div className="stat-icon-container">
+              <IconActivity className="stat-icon-main" />
+            </div>
+          </div>
+          <div className="stat-card-body">
+            <div className="stat-number-secondary">{(active || 0).toLocaleString()}</div>
+            <div className="stat-label-secondary">Active</div>
+          </div>
         </div>
-        <div className="stat-card neo-card">
-          <IconCheck className="stat-icon stat-icon-green" />
-          <span className="stat-num">{(offers || 0).toLocaleString()}</span>
-          <span className="stat-label">OFFERS</span>
+
+        <div className="stat-card-perfect stat-card-tertiary animate-stat-card" style={{ animationDelay: '200ms' }}>
+          <div className="stat-card-glow" />
+          <div className="stat-card-header">
+            <div className="stat-icon-container">
+              <IconCalendar className="stat-icon-main" />
+            </div>
+          </div>
+          <div className="stat-card-body">
+            <div className="stat-number-tertiary">{(interviews || 0).toLocaleString()}</div>
+            <div className="stat-label-tertiary">Interviews</div>
+          </div>
+        </div>
+
+        <div className="stat-card-perfect stat-card-quaternary animate-stat-card" style={{ animationDelay: '300ms' }}>
+          <div className="stat-card-glow" />
+          <div className="stat-card-header">
+            <div className="stat-icon-container">
+              <IconCheck className="stat-icon-main" />
+            </div>
+          </div>
+          <div className="stat-card-body">
+            <div className="stat-number-quaternary">{(offers || 0).toLocaleString()}</div>
+            <div className="stat-label-quaternary">Offers</div>
+          </div>
         </div>
       </div>
 
-      <div className="dashboard-middle">
-        <div className="dashboard-chart-card neo-card">
-          <div className="chart-header">
-            <div>
-              <h2>Application Overview</h2>
-              <p>Current status distribution</p>
-            </div>
-            {!isGuest && (
-              <button
-                type="button"
-                className="chart-sync-btn"
-                onClick={handleStartSync}
-                disabled={syncState.isRunning}
-              >
-                {syncState.isRunning ? 'Syncing...' : 'Sync'}
-              </button>
-            )}
-          </div>
-          <div className="chart-wrapper">
-            <div className="chart-plot">
-              <div className="chart-grid">
-                <span className="chart-grid-line" />
-                <span className="chart-grid-line" />
-                <span className="chart-grid-line" />
-              </div>
-              <div className="chart-row">
-                <div className="chart-y-axis">
-                  {yTicks.map((n, i) => (
-                    <span key={i}>{n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString()}</span>
-                  ))}
+      {/* Main Content - Perfect 2-Column Layout */}
+      <div className="dashboard-content-perfect">
+        {/* Left Column: Chart */}
+        <div className="dashboard-content-left">
+          <div className="content-card-perfect chart-card-perfect animate-slide-up">
+            <div className="content-card-header">
+              <div className="content-card-title-group">
+                <div className="content-card-icon">
+                  <IconChart />
                 </div>
-                <div className="chart-bars">
-                  {chartData.map((d) => {
-                    const pct = d.value > 0 ? Math.max((d.value / maxChartVal) * 100, 8) : 0
-                    return (
-                      <div key={d.key} className="chart-bar-col">
-                        <span className="chart-bar-spacer" />
-                        {d.value > 0 && <span className="chart-bar-value">{d.value.toLocaleString()}</span>}
-                        <div className={`chart-bar chart-bar-${d.key}`} style={{ height: `${pct}%` }} />
+                <div>
+                  <h2 className="content-card-title">Application Overview</h2>
+                  <p className="content-card-subtitle">Status distribution</p>
+                </div>
+              </div>
+              {!isGuest && (
+                <button
+                  type="button"
+                  className="content-card-action"
+                  onClick={handleStartSync}
+                  disabled={syncState.isRunning}
+                >
+                  <IconRefresh className={syncState.isRunning ? 'spinning' : ''} />
+                  <span>{syncState.isRunning ? 'Syncing...' : 'Sync'}</span>
+                </button>
+              )}
+            </div>
+            <div className="chart-wrapper-recharts">
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart
+                  data={chartData}
+                  margin={{ top: 20, right: 20, bottom: 60, left: 20 }}
+                  barCategoryGap="20%"
+                >
+                  <CartesianGrid 
+                    strokeDasharray="3 3" 
+                    stroke="rgba(255, 255, 255, 0.08)" 
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="name"
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: 'var(--text-muted)', fontSize: '0.8125rem', fontWeight: 600 }}
+                    angle={0}
+                    textAnchor="middle"
+                    height={60}
+                    interval={0}
+                    tickMargin={8}
+                  />
+                  <YAxis
+                    domain={[0, dynamicMax]}
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 700 }}
+                    tickFormatter={(value) => value >= 1000 ? `${(value / 1000).toFixed(1)}k` : value.toLocaleString()}
+                    width={50}
+                  />
+                  <Bar
+                    dataKey="value"
+                    radius={[8, 8, 0, 0]}
+                    minPointSize={6}
+                    barSize={52}
+                  >
+                    {chartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                    <LabelList 
+                      dataKey="value" 
+                      content={renderCustomLabel}
+                      position="top"
+                    />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: Profile & Activity */}
+        <div className="dashboard-content-right">
+          {/* Profile Card */}
+          <div className="content-card-perfect profile-card-perfect animate-slide-up" style={{ animationDelay: '150ms' }}>
+            <div className="content-card-header">
+              <div className="content-card-title-group">
+                <div className="content-card-icon">
+                  <IconUser />
+                </div>
+                <h3 className="content-card-title">Profile</h3>
+              </div>
+            </div>
+            <div className="profile-card-body">
+              <div className="profile-avatar-perfect">
+                {profileImage ? (
+                  <div className="profile-avatar-circle profile-avatar-with-image">
+                    <img src={profileImage} alt="Profile" className="profile-avatar-img" />
+                  </div>
+                ) : (
+                  <div className="profile-avatar-circle">
+                    {user?.email?.charAt(0).toUpperCase() || 'U'}
+                  </div>
+                )}
+                <div className="profile-status-dot" />
+              </div>
+              <div className="profile-info">
+                <div className="profile-name-perfect">{displayName}</div>
+                <div className="profile-email-perfect">
+                  <IconMail />
+                  <span>{user?.email || ''}</span>
+                </div>
+                <div className="profile-role-perfect">
+                  <IconCrown />
+                  <span>Editor</span>
+                </div>
+              </div>
+              <div className="profile-stat-perfect">
+                <IconBriefcase />
+                <div>
+                  <div className="profile-stat-number">{total || 0}</div>
+                  <div className="profile-stat-text">Applications</div>
+                </div>
+              </div>
+              
+              {/* Profile Links */}
+              {(links.linkedin || links.portfolio || links.indeed || links.github || links.website || links.other) && (
+                <div className="profile-links-section">
+                  <div className="profile-links-label">Links</div>
+                  <div className="profile-links-list">
+                    {links.linkedin && (
+                      <a 
+                        href={links.linkedin.startsWith('http') ? links.linkedin : `https://${links.linkedin}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="profile-link-item"
+                        title="LinkedIn"
+                      >
+                        <IconLinkedIn />
+                      </a>
+                    )}
+                    {links.portfolio && (
+                      <a 
+                        href={links.portfolio.startsWith('http') ? links.portfolio : `https://${links.portfolio}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="profile-link-item"
+                        title="Portfolio"
+                      >
+                        <IconGlobe />
+                      </a>
+                    )}
+                    {links.indeed && (
+                      <a 
+                        href={links.indeed.startsWith('http') ? links.indeed : `https://${links.indeed}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="profile-link-item"
+                        title="Indeed"
+                      >
+                        <IconLink />
+                      </a>
+                    )}
+                    {links.github && (
+                      <a 
+                        href={links.github.startsWith('http') ? links.github : `https://${links.github}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="profile-link-item"
+                        title="GitHub"
+                      >
+                        <IconGithub />
+                      </a>
+                    )}
+                    {links.website && (
+                      <a 
+                        href={links.website.startsWith('http') ? links.website : `https://${links.website}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="profile-link-item"
+                        title="Website"
+                      >
+                        <IconGlobe />
+                      </a>
+                    )}
+                    {links.other && (
+                      <a 
+                        href={links.other.startsWith('http') ? links.other : `https://${links.other}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="profile-link-item"
+                        title="Other"
+                      >
+                        <IconLink />
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Recent Activity Card */}
+          <div className="content-card-perfect activity-card-perfect animate-slide-up" style={{ animationDelay: '200ms' }}>
+            <div className="content-card-header">
+              <div className="content-card-title-group">
+                <div className="content-card-icon">
+                  <IconActivity />
+                </div>
+                <div>
+                  <h3 className="content-card-title">Recent Activity</h3>
+                  <p className="content-card-subtitle">{recentApps.length} items</p>
+                </div>
+              </div>
+              <Link to="/applications" className="content-card-link">
+                View All
+                <IconArrowRight />
+              </Link>
+            </div>
+            <div className="activity-list-perfect">
+              {recentApps.length === 0 ? (
+                <div className="activity-empty">
+                  <IconActivity />
+                  <p>No recent activity</p>
+                </div>
+              ) : (
+                recentApps.map((app, i) => {
+                  const statusIcon = app.status === 'applied' ? <IconPapers /> :
+                                    app.status === 'interview' ? <IconCalendar /> :
+                                    app.status === 'offer' ? <IconCheck /> :
+                                    <IconBriefcase />
+                  return (
+                    <div 
+                      key={app.id || i} 
+                      className="activity-item-perfect"
+                      style={{ animationDelay: `${300 + i * 50}ms` }}
+                    >
+                      <div className="activity-item-icon">{statusIcon}</div>
+                      <div className="activity-item-info">
+                        <div className="activity-company">{app.company || 'Unknown'}</div>
+                        <div className="activity-role">{app.role || ''}</div>
                       </div>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-            <div className="chart-labels">
-              {chartData.map((d) => (
-                <span key={d.key}>{d.label}</span>
-              ))}
-            </div>
-            <div className="chart-legend">
-              {chartData.map((d) => (
-                <div key={d.key} className="chart-legend-item">
-                  <span className={`chart-legend-dot chart-legend-dot-${d.key}`} />
-                  <span>{d.label}</span>
-                  <span className="chart-legend-val">{d.value.toLocaleString()}</span>
-                </div>
-              ))}
+                      <div className={`activity-status activity-status-${(app.status || '').toLowerCase()}`}>
+                        {app.status || '—'}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
             </div>
           </div>
-        </div>
-
-        <div className="dashboard-profile neo-card">
-          <div className="profile-avatar">{user?.email?.charAt(0).toUpperCase() || 'U'}</div>
-          <div className="profile-name">{displayName}</div>
-          <div className="profile-email">{user?.email || ''}</div>
-          <div className="profile-role">
-            <IconCrown />
-            <span>Editor</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="dashboard-recent neo-card">
-        <div className="recent-header">
-          <h2>Recent Activity</h2>
-          <Link to="/applications" className="recent-viewall">View All</Link>
-        </div>
-        <div className="recent-list">
-          {recentApps.length === 0 ? (
-            <p className="recent-empty">No recent activity.</p>
-          ) : (
-            recentApps.map((app, i) => (
-              <div key={app.id || i} className="recent-item">
-                <span className="recent-company">{app.company || 'Unknown'}</span>
-                <span className="recent-role">{app.role || ''}</span>
-                <span className={`status-badge status-${(app.status || '').toLowerCase()}`}>{app.status || '—'}</span>
-              </div>
-            ))
-          )}
         </div>
       </div>
 

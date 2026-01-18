@@ -1,16 +1,21 @@
 /* ===== Global: Typography + Neomorphism Variables ===== */
 :root {
   --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  /* Neomorphism shadows */
-  --neo-raised: 8px 8px 18px rgba(0, 0, 0, 0.38), -6px -6px 16px rgba(255, 255, 255, 0.04);
-  --neo-raised-sm: 5px 5px 12px rgba(0, 0, 0, 0.32), -4px -4px 10px rgba(255, 255, 255, 0.03);
-  --neo-inset: inset 4px 4px 8px rgba(0, 0, 0, 0.22), inset -3px -3px 6px rgba(255, 255, 255, 0.02);
-  --neo-inset-sm: inset 2px 2px 5px rgba(0, 0, 0, 0.18), inset -2px -2px 4px rgba(255, 255, 255, 0.02);
   /* Radii */
   --neo-r: 20px;
   --neo-r-sm: 14px;
   --neo-r-lg: 24px;
   --neo-r-xl: 28px;
+}
+
+/* ===== DARK MODE (Default - Unchanged) ===== */
+:root,
+[data-theme="dark"] {
+  /* Neomorphism shadows */
+  --neo-raised: 8px 8px 18px rgba(0, 0, 0, 0.38), -6px -6px 16px rgba(255, 255, 255, 0.04);
+  --neo-raised-sm: 5px 5px 12px rgba(0, 0, 0, 0.32), -4px -4px 10px rgba(255, 255, 255, 0.03);
+  --neo-inset: inset 4px 4px 8px rgba(0, 0, 0, 0.22), inset -3px -3px 6px rgba(255, 255, 255, 0.02);
+  --neo-inset-sm: inset 2px 2px 5px rgba(0, 0, 0, 0.18), inset -2px -2px 4px rgba(255, 255, 255, 0.02);
   /* Surfaces */
   --bg-base: #0f172a;
   --bg-card: #1a2234;
@@ -19,6 +24,25 @@
   --text: #e2e8f0;
   --text-muted: #94a3b8;
   --text-dim: #64748b;
+  --accent: #6366f1;
+  --accent-light: #818cf8;
+}
+
+/* ===== LIGHT MODE (Perfect Shades) ===== */
+[data-theme="light"] {
+  /* Neomorphism shadows - softer for light mode */
+  --neo-raised: 8px 8px 20px rgba(0, 0, 0, 0.08), -6px -6px 20px rgba(255, 255, 255, 0.9);
+  --neo-raised-sm: 4px 4px 12px rgba(0, 0, 0, 0.06), -3px -3px 12px rgba(255, 255, 255, 0.9);
+  --neo-inset: inset 3px 3px 8px rgba(0, 0, 0, 0.06), inset -3px -3px 8px rgba(255, 255, 255, 0.9);
+  --neo-inset-sm: inset 2px 2px 5px rgba(0, 0, 0, 0.05), inset -2px -2px 5px rgba(255, 255, 255, 0.9);
+  /* Surfaces - perfect light shades */
+  --bg-base: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-elevated: #ffffff;
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --text: #0f172a;
+  --text-muted: #475569;
+  --text-dim: #94a3b8;
   --accent: #6366f1;
   --accent-light: #818cf8;
 }
@@ -55,6 +79,30 @@ code {
   border-radius: var(--neo-r);
   box-shadow: var(--neo-raised);
   border: 1px solid var(--border-subtle);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.neo-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.02) 0%, rgba(139, 92, 246, 0.02) 100%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+[data-theme="light"] .neo-card::after {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.04) 0%, rgba(139, 92, 246, 0.04) 100%);
+}
+
+.neo-card:hover::after {
+  opacity: 1;
 }
 
 .neo-card-inset {
@@ -73,4 +121,102 @@ code {
   margin: 0 0 1rem;
   text-align: center;
   box-shadow: var(--neo-inset-sm), 0 2px 8px rgba(127, 29, 29, 0.35);
+}
+
+/* ===== LIGHT MODE ENHANCEMENTS ===== */
+[data-theme="light"] {
+  /* Enhanced card borders for better definition */
+}
+
+[data-theme="light"] .neo-card {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="light"] .neo-card-inset {
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+/* Light mode input fields - better visibility */
+[data-theme="light"] input,
+[data-theme="light"] select,
+[data-theme="light"] textarea {
+  background: rgba(0, 0, 0, 0.02);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: var(--text);
+}
+
+[data-theme="light"] input:focus,
+[data-theme="light"] select:focus,
+[data-theme="light"] textarea:focus {
+  background: rgba(0, 0, 0, 0.03);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+/* Light mode scrollbars */
+[data-theme="light"] ::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+/* Smooth theme transitions */
+* {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* Exclude transitions for performance-critical elements */
+svg,
+img,
+canvas,
+video {
+  transition: none;
+}
+
+/* ===== LIGHT MODE ENHANCEMENTS ===== */
+[data-theme="light"] {
+  /* Better contrast for light mode backgrounds */
+  --bg-base: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-elevated: #ffffff;
+  
+  /* Enhanced borders for visibility */
+  --border-subtle: rgba(0, 0, 0, 0.1);
+  
+  /* Better text contrast */
+  --text: #0f172a;
+  --text-muted: #475569;
+  --text-dim: #94a3b8;
+}
+
+/* Light mode specific adjustments for better readability */
+[data-theme="light"] .neo-card {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="light"] .neo-card-inset {
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="light"] body {
+  background: var(--bg-base);
+  color: var(--text);
+}
+
+/* Smooth theme transition */
+* {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Exclude transitions for performance-critical elements */
+*:not([data-theme]) {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }

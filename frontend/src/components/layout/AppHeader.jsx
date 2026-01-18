@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { useAuth } from '../../context/AuthContext'
-import { IconSearch, IconWifi, IconSun, IconRefresh, IconBell } from '../icons'
+import { useTheme } from '../../context/ThemeContext'
+import { IconSearch, IconWifi, IconSun, IconMoon, IconRefresh, IconBell } from '../icons'
 
 export default function AppHeader() {
   const { user, isGuest } = useAuth()
+  const { theme, toggleTheme, isDark } = useTheme()
   const [search, setSearch] = useState('')
 
   const initial = user?.email
@@ -28,8 +30,14 @@ export default function AppHeader() {
           <IconWifi />
           {isGuest ? 'Guest' : 'Connected'}
         </span>
-        <button type="button" className="app-header-icon-btn" aria-label="Theme">
-          <IconSun />
+        <button 
+          type="button" 
+          className="app-header-icon-btn" 
+          aria-label="Toggle theme"
+          onClick={toggleTheme}
+          title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {isDark ? <IconSun /> : <IconMoon />}
         </button>
         <button type="button" className="app-header-icon-btn" aria-label="Refresh">
           <IconRefresh />
