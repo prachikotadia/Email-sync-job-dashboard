@@ -19,12 +19,23 @@ export const gmailService = {
 
   /**
    * Start Gmail sync
-   * Returns sync job ID for tracking
+   * Returns { sync_id, status, ... } - sync_id is REQUIRED
    */
   async startSync() {
     try {
-      const response = await apiClient.post('/gmail/sync/start')
-      return response.data
+      const response = await apiClient.post('/gmail/sync')
+      const data = response.data
+      
+      // VALIDATE: Backend MUST return sync_id
+      if (!data.sync_id && !data.job_id) {
+        throw new Error('Backend did not return sync_id. Cannot start polling.')
+      }
+      
+      // Normalize: Use sync_id (preferred) or job_id (fallback)
+      return {
+        ...data,
+        sync_id: data.sync_id || data.job_id
+      }
     } catch (error) {
       if (error.response?.status === 409) {
         // Sync already running
@@ -38,12 +49,23 @@ export const gmailService = {
   /**
    * Get sync progress (polling endpoint)
    * Returns real-time counts from backend
+   * STRICT: Do not call API if syncId is falsy
    */
-  async getSyncProgress(jobId) {
+  async getSyncProgress(syncId) {
+    // STRICT GUARD: Never call API with undefined/null/empty syncId
+    if (!syncId || syncId === 'undefined' || syncId === 'null') {
+      throw new Error('Cannot get sync progress: syncId is invalid')
+    }
+
     try {
-      const response = await apiClient.get(`/gmail/sync/progress/${jobId}`)
+      const response = await apiClient.get(`/gmail/sync/progress/${syncId}`)
       return response.data
     } catch (error) {
+      // If service unavailable (503), throw with clear message
+      if (error.response?.status === 503) {
+        const errorMessage = error.response.data?.detail || 'Gmail service unavailable'
+        throw new Error(`Sync service unavailable: ${errorMessage}`)
+      }
       throw error
     }
   },

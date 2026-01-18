@@ -5,6 +5,7 @@ import { useProfileImage } from '../context/ProfileImageContext'
 import { useProfileLinks } from '../context/ProfileLinksContext'
 import { gmailService } from '../services/gmailService'
 import SyncCompleteModal from '../components/SyncCompleteModal'
+import SyncLogModal from '../components/SyncLogModal'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, LabelList, Cell } from 'recharts'
 import { 
   IconRocket, 
@@ -37,7 +38,7 @@ function Dashboard() {
   const [gmailStatus, setGmailStatus] = useState(null)
   const [syncState, setSyncState] = useState({
     isRunning: false,
-    jobId: null,
+    syncId: null, // Use sync_id consistently
     progress: null,
   })
   // 🚨 TEMPORARY GUEST MODE – mock initial state when isGuest so no loading flash, no API
@@ -46,6 +47,7 @@ function Dashboard() {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(() => !isGuest)
   const [showSyncCompleteModal, setShowSyncCompleteModal] = useState(false)
+  const [showSyncLogModal, setShowSyncLogModal] = useState(false)
   
   const pollIntervalRef = useRef(null)
   const syncCheckRef = useRef(false)
@@ -74,9 +76,11 @@ function Dashboard() {
       setStats(statsData)
       setApplications(appsData.applications || [])
       
-      // Check if sync is running
-      if (statusData.syncJobId) {
-        startProgressPolling(statusData.syncJobId)
+      // Check if sync is running (guard against undefined)
+      const existingSyncId = statusData?.syncJobId || statusData?.sync_id
+      if (existingSyncId) {
+        setShowSyncLogModal(true)
+        startProgressPolling(existingSyncId)
       }
     } catch (err) {
       setError(err.message || 'Failed to load dashboard data')
@@ -85,20 +89,48 @@ function Dashboard() {
     }
   }
 
-  const startProgressPolling = useCallback((jobId) => {
+  const startProgressPolling = useCallback((syncId) => {
+    // STRICT GUARD: Do not poll if syncId is undefined/null/empty
+    if (!syncId || syncId === 'undefined' || syncId === 'null') {
+      console.error('Cannot start polling: syncId is invalid', syncId)
+      setError('Cannot start sync progress tracking: invalid sync ID')
+      return
+    }
+
+    // Ensure only one interval runs at a time
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = null
     }
 
     setSyncState({
       isRunning: true,
-      jobId,
+      syncId,
       progress: null,
     })
 
+    let consecutiveErrors = 0
+    const MAX_CONSECUTIVE_ERRORS = 3
+
     pollIntervalRef.current = setInterval(async () => {
+      // Double-check syncId is still valid
+      if (!syncId || syncId === 'undefined' || syncId === 'null') {
+        console.error('Polling stopped: syncId became invalid')
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current)
+          pollIntervalRef.current = null
+        }
+        setSyncState(prev => ({ ...prev, isRunning: false }))
+        return
+      }
+
       try {
-        const progress = await gmailService.getSyncProgress(jobId)
+        const progress = await gmailService.getSyncProgress(syncId)
+        
+        // Reset error counter on success
+        consecutiveErrors = 0
+        setError(null)
+
         setSyncState(prev => ({
           ...prev,
           progress,
@@ -120,32 +152,85 @@ function Dashboard() {
           }
           setSyncState(prev => ({ ...prev, isRunning: false }))
           if (progress.status === 'completed') {
-            setShowSyncCompleteModal(true)
+            // Keep log modal open to show completion, then show completion modal
+            setTimeout(() => {
+              setShowSyncLogModal(false)
+              setShowSyncCompleteModal(true)
+            }, 2000)
+          } else {
+            // Keep log modal open to show failure
+            setShowSyncLogModal(true)
           }
           loadInitialData()
         }
       } catch (err) {
-        console.error('Progress polling error:', err)
-        // Continue polling even on error
+        consecutiveErrors++
+        const errorMessage = err.message || 'Failed to get sync progress'
+        console.error('Progress polling error:', errorMessage)
+        
+        // Stop polling on service unavailable (503) or too many errors
+        if (errorMessage.includes('service unavailable') || consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          console.error('Stopping polling due to persistent errors')
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current)
+            pollIntervalRef.current = null
+          }
+          setSyncState(prev => ({ ...prev, isRunning: false }))
+          setError(errorMessage)
+        } else {
+          // Show error but continue polling for transient errors
+          setError(`Sync progress error: ${errorMessage}`)
+        }
       }
     }, 2000) // Poll every 2 seconds
   }, [])
 
   const handleStartSync = async () => {
-    if (syncCheckRef.current) return // Prevent double execution
+    // Prevent double execution
+    if (syncCheckRef.current || syncState.isRunning) {
+      return
+    }
     syncCheckRef.current = true
 
     try {
       setError(null)
+      
+      // Step 1: Call POST /gmail/sync
       const result = await gmailService.startSync()
-      startProgressPolling(result.jobId)
+      
+      // Step 2: Read sync_id from response (normalized by gmailService)
+      const syncId = result.sync_id
+      
+      // Step 3: Validate sync_id exists
+      if (!syncId) {
+        throw new Error('Sync started but no sync_id returned from backend')
+      }
+      
+      // Step 4: Save sync_id in state and start polling
+      setSyncState(prev => ({
+        ...prev,
+        syncId,
+        isRunning: true,
+      }))
+      
+      // Show sync log modal
+      setShowSyncLogModal(true)
+      
+      startProgressPolling(syncId)
     } catch (err) {
-      setError(err.message || 'Failed to start sync')
-      if (err.message.includes('already running')) {
-        // Try to get the existing job ID
-        const status = await gmailService.getStatus()
-        if (status.syncJobId) {
-          startProgressPolling(status.syncJobId)
+      const errorMessage = err.message || 'Failed to start sync'
+      setError(errorMessage)
+      
+      // If sync is already running, try to get existing sync_id
+      if (errorMessage.includes('already running')) {
+        try {
+          const status = await gmailService.getStatus()
+          const existingSyncId = status.syncJobId || status.sync_id
+          if (existingSyncId) {
+            startProgressPolling(existingSyncId)
+          }
+        } catch (statusErr) {
+          console.error('Failed to get existing sync status:', statusErr)
         }
       }
     } finally {
@@ -185,6 +270,13 @@ function Dashboard() {
             </button>
           </div>
         </div>
+        {showSyncLogModal && (
+          <SyncLogModal
+            progress={syncState.progress}
+            isRunning={syncState.isRunning}
+            onClose={() => setShowSyncLogModal(false)}
+          />
+        )}
         {showSyncCompleteModal && (
           <SyncCompleteModal progress={syncState.progress} onClose={() => setShowSyncCompleteModal(false)} />
         )}
@@ -573,6 +665,13 @@ function Dashboard() {
         </div>
       </div>
 
+      {showSyncLogModal && (
+        <SyncLogModal
+          progress={syncState.progress}
+          isRunning={syncState.isRunning}
+          onClose={() => setShowSyncLogModal(false)}
+        />
+      )}
       {showSyncCompleteModal && (
         <SyncCompleteModal
           progress={syncState.progress}
