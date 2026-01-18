@@ -1,11 +1,14 @@
-from typing import AsyncIterator, Dict, List
+from typing import AsyncIterator, Dict, List, Optional
 from sqlalchemy.orm import Session
 from app.gmail_client import GmailClient
 from app.classifier import Classifier
-from app.company_extractor import CompanyExtractor
+from app.company_extractor import CompanyExtractor, ParsedEmail, CompanyExtractionResult
 from app.database import Application, User
 from datetime import datetime, timezone
 import logging
+import json
+import base64
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,13 @@ class SyncEngine:
         """Get the latest history ID from sync"""
         return self.latest_history_id
     
-    async def sync_all_emails(self, user_id: int, existing_history_id: str = None) -> AsyncIterator[Dict]:
+    async def sync_all_emails(
+        self,
+        user_id: uuid.UUID,
+        existing_history_id: str = None,
+        job_manager: Optional[object] = None,
+        job_id: Optional[uuid.UUID] = None
+    ) -> AsyncIterator[Dict]:
         """
         Sync ALL emails from Gmail
         NO pagination limits
@@ -63,6 +72,11 @@ class SyncEngine:
             
             logger.info(f"Starting sync for user {user_id}: Estimated {total_count} emails to scan")
             
+            # Log to job if available
+            if job_manager and job_id:
+                job_manager.log(job_id, "INFO", f"Starting sync: Estimated {total_count} emails to scan")
+                job_manager.update_progress(job_id, total_estimated=total_count, phase="FETCHING")
+            
             # Fetch ALL messages (incremental if historyId exists)
             # This MUST paginate until nextPageToken is null - NO early exit
             messages, latest_history_id = self.gmail_client.get_all_messages(query, existing_history_id)
@@ -73,12 +87,23 @@ class SyncEngine:
             logger.info(f"Total Gmail emails: {total_scanned}")
             logger.info(f"Fetched messages: {total_fetched}")
             
+            # Update job progress with detailed logging
+            if job_manager and job_id:
+                job_manager.log(job_id, "INFO", f"📧 Total Gmail emails found: {total_scanned}")
+                job_manager.log(job_id, "INFO", f"📥 Fetched {total_fetched} emails from Gmail API")
+                job_manager.update_progress(job_id, emails_fetched=total_fetched, phase="CLASSIFYING")
+                job_manager.log(job_id, "INFO", f"🔄 Starting Stage 1: High-recall filtering of {total_fetched} emails...")
+            
             # Verify: If X ≠ X → BUG (but allow for API estimate vs actual)
             if total_fetched < total_scanned * 0.9:  # Allow 10% variance for API estimates
                 logger.warning(f"Fetched count ({total_fetched}) significantly less than estimated ({total_scanned}). May indicate pagination issue.")
+                if job_manager and job_id:
+                    job_manager.log(job_id, "WARN", f"Fetched count ({total_fetched}) less than estimated ({total_scanned})")
             
             # Stage 1: High Recall - Filter candidate job emails
             candidate_emails = []
+            stage1_processed = 0
+            stage1_batch_size = 50  # Log every 50 emails during Stage 1
             for message in messages:
                 try:
                     if self._is_candidate_job_email(message):
@@ -86,14 +111,29 @@ class SyncEngine:
                         candidate_job_emails += 1
                     else:
                         skipped += 1
+                    stage1_processed += 1
+                    
+                    # Log progress every 50 emails during Stage 1 for real-time updates
+                    if job_manager and job_id and stage1_processed % stage1_batch_size == 0:
+                        job_manager.log(job_id, "INFO", f"🔍 Stage 1: Processed {stage1_processed}/{total_fetched} emails, found {candidate_job_emails} job candidates so far...")
                 except Exception as e:
                     logger.warning(f"Error checking message {message.get('id')}: {e}")
                     skipped += 1
+                    stage1_processed += 1
                     continue
             
             logger.info(f"Stage 1: Found {candidate_job_emails} candidate job emails")
             
+            if job_manager and job_id:
+                job_manager.log(job_id, "INFO", f"Stage 1 complete: Identified {candidate_job_emails} job-related emails out of {total_fetched} total")
+                job_manager.log(job_id, "INFO", f"Starting Stage 2: High-precision classification of {candidate_job_emails} candidate emails...")
+            
             # Stage 2: High Precision - Classify and save
+            processed_count = 0
+            log_batch_size = 10  # Log every 10 items
+            db_commit_batch_size = 50  # Commit to DB every 50 items (reduces DB load for large batches)
+            pending_applications = []  # Batch database commits
+            
             for message in candidate_emails:
                 try:
                     # Extract application data
@@ -113,8 +153,8 @@ class SyncEngine:
                     # Get thread ID from message
                     thread_id = message.get('threadId')
                     
-                    # Save to database (category will be converted to uppercase in _save_application)
-                    self._save_application(user_id, message.get('id'), application_data, category, thread_id)
+                    # Prepare application for batch save (don't commit yet)
+                    pending_applications.append((user_id, message.get('id'), application_data, category, thread_id))
                     
                     # Update classified counts (category is already uppercase from classifier or will be normalized)
                     category_upper = category.upper()
@@ -122,6 +162,48 @@ class SyncEngine:
                         category_upper = "OFFER_ACCEPTED"
                     if category_upper in classified:
                         classified[category_upper] += 1
+                    
+                    processed_count += 1
+                    
+                    # Batch commit to database every N applications (reduces DB load for 2000+ emails)
+                    if len(pending_applications) >= db_commit_batch_size:
+                        try:
+                            for uid, msg_id, app_data, cat, tid in pending_applications:
+                                self._save_application(uid, msg_id, app_data, cat, tid)
+                            self.db.commit()
+                            pending_applications = []
+                        except Exception as e:
+                            logger.error(f"Error batch committing applications: {e}")
+                            self.db.rollback()
+                            # Try individual saves as fallback
+                            for uid, msg_id, app_data, cat, tid in pending_applications:
+                                try:
+                                    self._save_application(uid, msg_id, app_data, cat, tid)
+                                    self.db.commit()
+                                except Exception as save_error:
+                                    logger.warning(f"Error saving application {msg_id}: {save_error}")
+                                    self.db.rollback()
+                            pending_applications = []
+                    
+                    # Update job progress more frequently (every 10 items or at end) for real-time updates
+                    if job_manager and job_id and (processed_count % log_batch_size == 0 or processed_count == len(candidate_emails)):
+                        # Convert classified dict keys to lowercase for API response
+                        category_counts_lower = {k.lower(): v for k, v in classified.items()}
+                        job_manager.update_progress(
+                            job_id,
+                            emails_classified=processed_count,
+                            applications_stored=sum(classified.values()),
+                            skipped=skipped,
+                            category_counts=category_counts_lower,
+                            phase="STORING"
+                        )
+                        # Log progress every batch for real-time feedback
+                        if processed_count % log_batch_size == 0:
+                            applied_count = classified.get('APPLIED', 0)
+                            rejected_count = classified.get('REJECTED', 0)
+                            interview_count = classified.get('INTERVIEW', 0)
+                            offer_count = classified.get('OFFER_ACCEPTED', 0)
+                            job_manager.log(job_id, "INFO", f"📊 Classified {processed_count}/{len(candidate_emails)} emails | Stored: {sum(classified.values())} apps (Applied: {applied_count}, Rejected: {rejected_count}, Interview: {interview_count}, Offer: {offer_count})")
                     
                     # Yield progress update
                     yield {
@@ -136,12 +218,47 @@ class SyncEngine:
                     skipped += 1
                     continue
             
+            # Commit any remaining pending applications
+            if pending_applications:
+                try:
+                    for uid, msg_id, app_data, cat, tid in pending_applications:
+                        self._save_application(uid, msg_id, app_data, cat, tid)
+                    self.db.commit()
+                except Exception as e:
+                    logger.error(f"Error committing final batch of applications: {e}")
+                    self.db.rollback()
+                    # Try individual saves as fallback
+                    for uid, msg_id, app_data, cat, tid in pending_applications:
+                        try:
+                            self._save_application(uid, msg_id, app_data, cat, tid)
+                            self.db.commit()
+                        except Exception as save_error:
+                            logger.warning(f"Error saving application {msg_id}: {save_error}")
+                            self.db.rollback()
+            
             logger.info(
                 f"Fetched: {total_fetched} emails. Job-related candidates: {candidate_job_emails}. "
                 f"APPLIED: {classified['APPLIED']}, REJECTED: {classified['REJECTED']}, "
                 f"INTERVIEW: {classified['INTERVIEW']}, OFFER_ACCEPTED: {classified['OFFER_ACCEPTED']}, "
                 f"GHOSTED: {classified['GHOSTED']}. Skipped: {skipped}."
             )
+            
+            # Final job update
+            if job_manager and job_id:
+                category_counts_lower = {k.lower(): v for k, v in classified.items()}
+                job_manager.update_progress(
+                    job_id,
+                    emails_classified=candidate_job_emails,
+                    applications_stored=sum(classified.values()),
+                    skipped=skipped,
+                    category_counts=category_counts_lower,
+                    phase="FINALIZING"
+                )
+                # Detailed completion logs
+                job_manager.log(job_id, "INFO", f"✅ Sync complete! Processed {total_fetched} emails, found {candidate_job_emails} job-related emails")
+                job_manager.log(job_id, "INFO", f"📊 Final counts: {sum(classified.values())} applications stored")
+                job_manager.log(job_id, "INFO", f"   - Applied: {classified.get('APPLIED', 0)}, Rejected: {classified.get('REJECTED', 0)}, Interview: {classified.get('INTERVIEW', 0)}")
+                job_manager.log(job_id, "INFO", f"   - Offer/Accepted: {classified.get('OFFER_ACCEPTED', 0)}, Ghosted: {classified.get('GHOSTED', 0)}, Skipped: {skipped}")
             
         except Exception as e:
             logger.error(f"Sync error: {e}", exc_info=True)
@@ -227,24 +344,70 @@ class SyncEngine:
         except:
             received_at = datetime.now(timezone.utc)
         
-        # Extract company and role using company extractor
-        company = self.company_extractor.extract(subject, from_email, message.get('snippet', ''))
+        # Extract body text if available for better company name extraction
+        body_text = ""
+        try:
+            payload = message.get('payload', {})
+            # Check if body is directly in payload
+            if 'body' in payload and payload['body'].get('data'):
+                import base64
+                body_text = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', errors='ignore')
+            # Check parts for body text
+            elif 'parts' in payload:
+                for part in payload.get('parts', []):
+                    if part.get('mimeType') == 'text/plain' and 'body' in part:
+                        body_data = part.get('body', {}).get('data', '')
+                        if body_data:
+                            import base64
+                            body_text = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                            break
+        except Exception as e:
+            logger.debug(f"Could not extract body text: {e}")
+        
+        # Build ParsedEmail object for new extractor
+        parsed_email = ParsedEmail(
+            from_email=from_email,
+            from_name=from_email.split('<')[0].strip().strip('"') if '<' in from_email else '',
+            reply_to_email=None,  # Will be extracted from headers below
+            subject=subject,
+            snippet=message.get('snippet', ''),
+            headers={h.get('name', '').lower(): h.get('value', '') for h in headers},
+            list_unsubscribe=None,  # Will be extracted from headers below
+            body_text=body_text,
+            body_html=None,
+            received_at=date_str,
+            message_id=message.get('id', ''),
+            thread_id=message.get('threadId', '')
+        )
+        
+        # Extract reply-to and list-unsubscribe from headers
+        for header in headers:
+            name = header.get('name', '').lower()
+            value = header.get('value', '')
+            if name == 'reply-to':
+                parsed_email.reply_to_email = value
+            elif name == 'list-unsubscribe':
+                parsed_email.list_unsubscribe = value
+        
+        # Extract company using new extractor
+        extraction_result: CompanyExtractionResult = self.company_extractor.extract_company_name(
+            parsed_email, 
+            user_email=""  # Can be passed if available
+        )
+        
+        company = extraction_result.company_name
         role = self.company_extractor.extract_role(subject, message.get('snippet', ''))
         
-        # Ensure company is never None - use fallback
-        if not company:
-            # Fallback: extract from email domain
-            if '@' in from_email:
-                domain = from_email.split('@')[1].lower()
-                if domain not in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com']:
-                    company = domain.split('.')[0].capitalize()
-                else:
-                    company = 'Unknown Company'
-            else:
-                company = 'Unknown Company'
+        # Ensure company is never None
+        if not company or company.strip() == '':
+            company = 'Unknown'
         
         return {
             "company_name": company,
+            "company_confidence": extraction_result.confidence,
+            "company_source": extraction_result.source,
+            "company_raw_candidates": json.dumps(extraction_result.candidates),
+            "ats_provider": extraction_result.ats_provider,
             "role": role,
             "subject": subject,
             "from_email": from_email,
@@ -294,20 +457,18 @@ class SyncEngine:
             logger.warning(f"Invalid category: {category}, skipping")
             return
         
-        # Ensure company_name is never null - use fallback
-        company_name = application_data.get("company_name")
+        # Extract company extraction fields
+        company_name = application_data.get("company_name", "Unknown")
+        company_confidence = application_data.get("company_confidence", 0)
+        company_source = application_data.get("company_source", "UNKNOWN")
+        company_raw_candidates = application_data.get("company_raw_candidates", "[]")
+        ats_provider = application_data.get("ats_provider")
+        
+        # Ensure company_name is never null
         if not company_name or company_name.strip() == '':
-            # Fallback extraction from email domain
-            from_email = application_data.get("from_email", "")
-            if '@' in from_email:
-                domain = from_email.split('@')[1].lower()
-                # Remove common email providers
-                if domain not in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com']:
-                    company_name = domain.split('.')[0].capitalize()
-                else:
-                    company_name = 'Unknown Company'
-            else:
-                company_name = 'Unknown Company'
+            company_name = 'Unknown'
+            company_confidence = 0
+            company_source = 'UNKNOWN'
         
         # Extract company domain
         from_email = application_data.get("from_email", "")
@@ -334,6 +495,10 @@ class SyncEngine:
             # Update existing
             existing.company_name = company_name
             existing.company_domain = company_domain
+            existing.company_confidence = company_confidence
+            existing.company_source = company_source
+            existing.company_raw_candidates = company_raw_candidates
+            existing.ats_provider = ats_provider
             existing.role = application_data.get("role")
             existing.category = category_upper
             existing.subject = subject
@@ -352,6 +517,10 @@ class SyncEngine:
                 gmail_web_url=gmail_web_url,
                 company_name=company_name,
                 company_domain=company_domain,
+                company_confidence=company_confidence,
+                company_source=company_source,
+                company_raw_candidates=company_raw_candidates,
+                ats_provider=ats_provider,
                 role=application_data.get("role"),
                 category=category_upper,
                 subject=subject,

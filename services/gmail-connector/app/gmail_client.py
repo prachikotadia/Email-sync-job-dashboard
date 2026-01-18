@@ -1,8 +1,11 @@
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
+from googleapiclient.errors import HttpError
 from typing import List, Dict, Optional
 import logging
 import json
+import time
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -128,31 +131,105 @@ class GmailClient:
         if not history_id:
             # Full sync: paginate until nextPageToken is null. NO maxResults cap.
             # Gmail API allows up to 500 per page, but we MUST loop until all are fetched.
+            # Add rate limiting and retry logic to handle large batches (2000+ emails)
+            page_count = 0
+            max_retries = 5
+            retry_delay = 1  # Start with 1 second
+            
             while True:
-                try:
-                    # Use maxResults=500 per page (Gmail API limit), but loop until nextPageToken is null
-                    result = self.service.users().messages().list(
-                        userId='me', q=query, pageToken=page_token, maxResults=500
-                    ).execute()
-                    message_ids = result.get('messages', [])
-                    latest_history_id = result.get('historyId')
-                    for msg in message_ids:
-                        try:
-                            message = self.service.users().messages().get(
-                                userId='me', id=msg['id'], format='full'
-                            ).execute()
-                            messages.append(message)
-                        except Exception as e:
-                            logger.warning(f"Error fetching message {msg['id']}: {e}")
-                            continue
-                    page_token = result.get('nextPageToken')
-                    if not page_token:
-                        # nextPageToken is null - we've fetched ALL messages
-                        break
-                except Exception as e:
-                    logger.error(f"Error fetching messages page: {e}")
-                    # Don't break on single page error - try to continue
-                    # But log the error
+                retries = 0
+                success = False
+                
+                while retries < max_retries and not success:
+                    try:
+                        # Use maxResults=500 per page (Gmail API limit), but loop until nextPageToken is null
+                        result = self.service.users().messages().list(
+                            userId='me', q=query, pageToken=page_token, maxResults=500
+                        ).execute()
+                        message_ids = result.get('messages', [])
+                        latest_history_id = result.get('historyId')
+                        page_count += 1
+                        
+                        # Fetch messages with rate limiting (Gmail API: 250 quota units per user per second)
+                        # Each message.get() costs 5 quota units, so we can do ~50 per second
+                        # Add small delay between batches to avoid rate limits
+                        batch_size = 50
+                        for i, msg in enumerate(message_ids):
+                            msg_retries = 0
+                            msg_success = False
+                            
+                            while msg_retries < 3 and not msg_success:
+                                try:
+                                    message = self.service.users().messages().get(
+                                        userId='me', id=msg['id'], format='full'
+                                    ).execute()
+                                    messages.append(message)
+                                    msg_success = True
+                                    
+                                except HttpError as e:
+                                    if e.resp.status == 429:  # Rate limit exceeded
+                                        wait_time = retry_delay * (2 ** msg_retries) + random.uniform(0, 1)
+                                        logger.warning(f"Rate limit hit on message {msg['id']}, waiting {wait_time:.2f}s...")
+                                        time.sleep(wait_time)
+                                        msg_retries += 1
+                                        if msg_retries >= 3:
+                                            logger.error(f"Max retries reached for message {msg['id']}, skipping")
+                                            break
+                                    elif e.resp.status == 404:  # Message not found (deleted)
+                                        logger.warning(f"Message {msg['id']} not found (may have been deleted)")
+                                        msg_success = True  # Skip this message
+                                        break
+                                    else:
+                                        logger.warning(f"HTTP error fetching message {msg['id']}: {e}")
+                                        msg_retries += 1
+                                        if msg_retries >= 3:
+                                            break
+                                        time.sleep(retry_delay * (2 ** msg_retries))
+                                        
+                                except Exception as e:
+                                    logger.warning(f"Error fetching message {msg['id']}: {e}")
+                                    msg_retries += 1
+                                    if msg_retries >= 3:
+                                        break
+                                    time.sleep(retry_delay * (2 ** msg_retries))
+                            
+                            # Rate limiting: small delay every 50 messages to avoid hitting quota
+                            if (i + 1) % batch_size == 0:
+                                time.sleep(0.1)  # 100ms delay every 50 messages
+                        
+                        success = True
+                        page_token = result.get('nextPageToken')
+                        
+                        # Log progress every 5 pages for large batches
+                        if page_count % 5 == 0:
+                            logger.info(f"Fetched {len(messages)} messages so far (page {page_count})...")
+                        
+                        if not page_token:
+                            # nextPageToken is null - we've fetched ALL messages
+                            break
+                            
+                    except HttpError as e:
+                        if e.resp.status == 429:  # Rate limit exceeded
+                            wait_time = retry_delay * (2 ** retries) + random.uniform(0, 1)
+                            logger.warning(f"Rate limit exceeded on page fetch, waiting {wait_time:.2f}s...")
+                            time.sleep(wait_time)
+                            retries += 1
+                            if retries >= max_retries:
+                                logger.error(f"Max retries reached for page fetch. Continuing with {len(messages)} messages.")
+                                break
+                        else:
+                            logger.error(f"HTTP error fetching messages page: {e}")
+                            # Try to continue with next page
+                            break
+                    except Exception as e:
+                        logger.error(f"Error fetching messages page: {e}")
+                        retries += 1
+                        if retries >= max_retries:
+                            logger.error(f"Max retries reached. Continuing with {len(messages)} messages.")
+                            break
+                        time.sleep(retry_delay * (2 ** retries))
+                
+                if not success or not page_token:
                     break
             
             # Verify we fetched all messages

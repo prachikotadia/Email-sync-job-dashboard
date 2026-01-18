@@ -8,7 +8,8 @@ from app.gmail_client import GmailClient
 from app.sync_engine import SyncEngine
 from app.classifier import Classifier
 from app.company_extractor import CompanyExtractor
-from app.database import get_db, init_db, engine, User, Application, SyncState, OAuthToken
+from app.database import get_db, init_db, engine, User, Application, SyncState, OAuthToken, GmailSyncJob, GmailSyncJobLog
+from app.job_manager import JobManager
 from app.ghosted_detector import GhostedDetector
 from app.export_service import generate_export
 from datetime import datetime, timedelta, timezone
@@ -253,6 +254,193 @@ async def start_sync(
         "sync_id": job_id  # Required for frontend polling - use sync_id consistently
     }
 
+@app.post("/gmail/sync/start")
+async def start_sync_job(
+    request: SyncStartRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Start a new sync job or return existing running job."""
+    user_email = request.user_email
+    
+    # Get or create user
+    user = db.query(User).filter(User.email == user_email).first()
+    if not user:
+        user = User(email=user_email)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    
+    # Create or get existing job
+    job_manager = JobManager(db)
+    job = job_manager.create_job(user.id, user_email)
+    
+    # If job is already running, return it
+    if job.status == "RUNNING":
+        return {
+            "jobId": str(job.id),
+            "status": job.status,
+            "startedAt": job.started_at.isoformat() if job.started_at else None
+        }
+    
+    # Start background task
+    background_tasks.add_task(run_sync_job, job.id, user.id, user_email, db)
+    
+    return {
+        "jobId": str(job.id),
+        "status": "QUEUED",
+        "startedAt": job.started_at.isoformat() if job.started_at else None
+    }
+
+@app.get("/gmail/sync/status")
+async def get_sync_status(
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get current sync job status for user."""
+    user = db.query(User).filter(User.email == user_id).first()
+    if not user:
+        return {"jobId": None, "status": None}
+    
+    job = db.query(GmailSyncJob).filter(
+        GmailSyncJob.user_id == user.id,
+        GmailSyncJob.status.in_(["QUEUED", "RUNNING"])
+    ).order_by(GmailSyncJob.started_at.desc()).first()
+    
+    if not job:
+        return {"jobId": None, "status": None}
+    
+    # Parse category counts
+    category_counts = {}
+    if job.category_counts:
+        try:
+            category_counts = json.loads(job.category_counts)
+        except:
+            pass
+    
+    # Calculate percent
+    percent = 0
+    if job.total_messages_estimated and job.total_messages_estimated > 0:
+        percent = (job.emails_fetched / job.total_messages_estimated) * 100
+    
+    return {
+        "jobId": str(job.id),
+        "status": job.status,
+        "phase": job.phase,
+        "totalEmailsEstimated": job.total_messages_estimated,
+        "emailsFetched": job.emails_fetched,
+        "emailsClassified": job.emails_classified,
+        "applicationsStored": job.applications_stored,
+        "skipped": job.skipped_messages,
+        "categoryCounts": category_counts,
+        "percent": round(percent, 2),
+        "etaSeconds": job.eta_seconds,
+        "ratePerSec": job.rate_per_sec,
+        "startedAt": job.started_at.isoformat() if job.started_at else None,
+        "updatedAt": job.updated_at.isoformat() if job.updated_at else None
+    }
+
+async def run_sync_job(job_id: uuid.UUID, user_id: uuid.UUID, user_email: str, db: Session):
+    """Background worker that runs the sync job using JobManager."""
+    job_manager = JobManager(db)
+    
+    try:
+        # Start job
+        job_manager.start_job(job_id)
+        
+        # Get OAuth tokens
+        oauth_token = db.query(OAuthToken).filter(OAuthToken.user_id == user_id).first()
+        if not oauth_token:
+            raise Exception("No OAuth tokens found. Please re-authenticate.")
+        
+        # Check if token is expired
+        if oauth_token.expires_at:
+            expires_at_aware = oauth_token.expires_at
+            if expires_at_aware.tzinfo is None:
+                expires_at_aware = expires_at_aware.replace(tzinfo=timezone.utc)
+            
+            if expires_at_aware < datetime.now(timezone.utc):
+                if not oauth_token.refresh_token:
+                    raise Exception("Access token expired and no refresh token available. Please re-authenticate.")
+                logger.warning(f"Access token expired for user {user_email}, but refresh not yet implemented")
+        
+        # Initialize Gmail client
+        gmail_client = GmailClient(user_id, user_email, oauth_token)
+        
+        # Validate email
+        gmail_email = await gmail_client.get_user_email()
+        if gmail_email.lower() != user_email.lower():
+            raise Exception(f"Gmail email mismatch: {gmail_email} != {user_email}")
+        
+        # Get sync state
+        sync_state = db.query(SyncState).filter(SyncState.user_id == user_id).first()
+        if not sync_state:
+            sync_state = SyncState(user_id=user_id)
+            db.add(sync_state)
+            db.commit()
+        
+        # Initialize sync engine
+        sync_engine = SyncEngine(gmail_client, classifier, company_extractor, db)
+        
+        # Run sync with job tracking
+        job_manager.log(job_id, "INFO", "🚀 Starting Gmail sync job...")
+        job_manager.log(job_id, "INFO", "📋 Phase 1: Connecting to Gmail API...")
+        
+        total_fetched = 0
+        total_classified = 0
+        total_stored = 0
+        total_skipped = 0
+        category_counts = {}
+        
+        async for progress in sync_engine.sync_all_emails(
+            user_id,
+            sync_state.gmail_history_id,
+            job_manager=job_manager,
+            job_id=job_id
+        ):
+            # Update progress from sync engine
+            total_fetched = progress.get("total_fetched", 0)
+            total_classified = progress.get("candidate_job_emails", 0)
+            total_stored = sum(progress.get("classified", {}).values())
+            total_skipped = progress.get("skipped", 0)
+            category_counts = progress.get("classified", {})
+            
+            # Update job progress
+            job_manager.update_progress(
+                job_id,
+                emails_fetched=total_fetched,
+                emails_classified=total_classified,
+                applications_stored=total_stored,
+                skipped=total_skipped,
+                category_counts=category_counts,
+                total_estimated=progress.get("total_scanned"),
+                phase="CLASSIFYING" if total_fetched > 0 else "FETCHING"
+            )
+        
+        # Update sync state
+        sync_state.gmail_history_id = sync_engine.get_latest_history_id()
+        sync_state.last_synced_at = datetime.now(timezone.utc)
+        sync_state.is_sync_running = False
+        sync_state.sync_lock_expires_at = None
+        sync_state.lock_job_id = None
+        db.commit()
+        
+        # Complete job
+        job_manager.complete_job(job_id)
+        job_manager.log(job_id, "INFO", "Sync completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Sync job {job_id} failed: {e}", exc_info=True)
+        job_manager.fail_job(job_id, str(e))
+        
+        # Release sync lock
+        sync_state = db.query(SyncState).filter(SyncState.user_id == user_id).first()
+        if sync_state:
+            sync_state.is_sync_running = False
+            sync_state.sync_lock_expires_at = None
+            sync_state.lock_job_id = None
+            db.commit()
+
 async def run_sync(job_id: str, user_id: int, user_email: str, db: Session):
     """
     Run Gmail sync - fetches ALL emails, no limits. user_id=DB id, user_email for validation.
@@ -377,80 +565,111 @@ async def run_sync(job_id: str, user_id: int, user_email: str, db: Session):
             db.commit()
 
 @app.get("/gmail/sync/progress/{job_id}")
-async def get_sync_progress(job_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
+async def get_sync_progress_db(job_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
     """
-    Get sync progress (for polling)
+    Get progress for a specific job (database-based).
     Returns real-time counts from backend matching exact response format
-    
-    STRICT: job_id must be valid (not undefined/null/empty)
     """
-    # Validate job_id before processing
+    # Validate job_id
     if not job_id or job_id in ['undefined', 'null', '']:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid job_id: '{job_id}'. Cannot get progress."
-        )
+        raise HTTPException(status_code=400, detail="Invalid job_id")
     
-    if job_id not in sync_jobs:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Sync job '{job_id}' not found. It may have completed, failed, or been cleared."
-        )
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
     
-    job = sync_jobs[job_id]
+    job = db.query(GmailSyncJob).filter(GmailSyncJob.id == job_uuid).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     
-    # Validate user (user_id is email from JWT)
-    if job.get("user_email") != user_id:
+    # Validate user
+    user = db.query(User).filter(User.email == user_id).first()
+    if not user or job.user_id != user.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    # Get real counts from DB (must match exactly)
-    user_db = db.query(User).filter(User.id == job["user_id"]).first()
-    if not user_db:
-        raise HTTPException(status_code=404, detail="User not found")
+    # Parse category counts
+    category_counts = {}
+    if job.category_counts:
+        try:
+            category_counts = json.loads(job.category_counts)
+        except:
+            pass
     
-    # Get classified counts from DB
-    applications = db.query(Application).filter(Application.user_id == job["user_id"]).all()
-    db_classified = {
-        "applied": 0,
-        "rejected": 0,
-        "interview": 0,
-        "offer": 0,
-        "ghosted": 0,
-    }
-    for app in applications:
-        cat = app.category.upper()
-        if cat == "APPLIED":
-            db_classified["applied"] += 1
-        elif cat == "REJECTED":
-            db_classified["rejected"] += 1
-        elif cat == "INTERVIEW":
-            db_classified["interview"] += 1
-        elif cat == "OFFER_ACCEPTED":
-            db_classified["offer"] += 1
-        elif cat == "GHOSTED":
-            db_classified["ghosted"] += 1
+    # Calculate percent
+    percent = 0
+    if job.total_messages_estimated and job.total_messages_estimated > 0:
+        percent = (job.emails_fetched / job.total_messages_estimated) * 100
     
-    # Return exact format per requirements
-    status = job["status"]
-    if status == "completed":
-        status = "completed"
-    elif status == "failed":
-        status = "failed"
-    else:
-        status = "running"
+    # Get last log message
+    last_log = db.query(GmailSyncJobLog).filter(
+        GmailSyncJobLog.job_id == job_uuid
+    ).order_by(GmailSyncJobLog.seq.desc()).first()
+    
+    last_message = last_log.message if last_log else None
     
     return {
-        "status": status,
-        "total_emails": job.get("total_scanned", 0),
-        "fetched_emails": job.get("total_fetched", 0),
-        "classified": {
-            "applied": db_classified["applied"],
-            "rejected": db_classified["rejected"],
-            "interview": db_classified["interview"],
-            "offer": db_classified["offer"],
-            "ghosted": db_classified["ghosted"],
-            "skipped": job.get("skipped", 0),
-        }
+        "jobId": str(job.id),
+        "state": job.status,
+        "phase": job.phase,
+        "totalEmailsEstimated": job.total_messages_estimated,
+        "emailsFetched": job.emails_fetched,
+        "emailsClassified": job.emails_classified,
+        "applicationsCreatedOrUpdated": job.applications_stored,
+        "skipped": job.skipped_messages,
+        "categoryCounts": category_counts,
+        "percent": round(percent, 2),
+        "etaSeconds": job.eta_seconds,
+        "ratePerSec": job.rate_per_sec,
+        "lastMessage": last_message,
+        "updatedAt": job.updated_at.isoformat() if job.updated_at else None,
+        "errorMessage": job.error_message
+    }
+
+@app.get("/gmail/sync/logs/{job_id}")
+async def get_sync_logs(
+    job_id: str,
+    after_seq: int = Query(0),
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get logs for a job after a specific sequence number."""
+    # Validate job_id
+    if not job_id or job_id in ['undefined', 'null', '']:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    
+    job = db.query(GmailSyncJob).filter(GmailSyncJob.id == job_uuid).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Validate user
+    user = db.query(User).filter(User.email == user_id).first()
+    if not user or job.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    # Get logs
+    logs = db.query(GmailSyncJobLog).filter(
+        GmailSyncJobLog.job_id == job_uuid,
+        GmailSyncJobLog.seq > after_seq
+    ).order_by(GmailSyncJobLog.seq.asc()).limit(1000).all()
+    
+    return {
+        "jobId": str(job.id),
+        "logs": [
+            {
+                "seq": log.seq,
+                "timestamp": log.timestamp.isoformat(),
+                "level": log.level,
+                "message": log.message
+            }
+            for log in logs
+        ],
+        "lastSeq": logs[-1].seq if logs else after_seq
     }
 
 def calculate_stats(db: Session, user_id) -> dict:
@@ -882,6 +1101,17 @@ async def export_applications(
     except Exception as e:
         logger.error(f"Export error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Export generation failed: {str(e)}")
+
+@app.post("/train-company-model")
+async def train_company_model_endpoint(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Train company name extraction model from existing application data"""
+    try:
+        from app.train_company_model import train_company_model
+        background_tasks.add_task(train_company_model)
+        return {"status": "success", "message": "Company model training started in background"}
+    except Exception as e:
+        logger.error(f"Error starting model training: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to start training: {str(e)}")
 
 @app.get("/health")
 async def health():

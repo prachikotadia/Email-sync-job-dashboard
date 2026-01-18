@@ -6,6 +6,8 @@ import { useProfileLinks } from '../context/ProfileLinksContext'
 import { gmailService } from '../services/gmailService'
 import SyncCompleteModal from '../components/SyncCompleteModal'
 import SyncLogModal from '../components/SyncLogModal'
+import SyncProgressModal from '../components/SyncProgressModal'
+import SyncDialog from '../components/SyncDialog'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, LabelList, Cell } from 'recharts'
 import { 
   IconRocket, 
@@ -48,6 +50,9 @@ function Dashboard() {
   const [loading, setLoading] = useState(() => !isGuest)
   const [showSyncCompleteModal, setShowSyncCompleteModal] = useState(false)
   const [showSyncLogModal, setShowSyncLogModal] = useState(false)
+  const [syncJobId, setSyncJobId] = useState(null)
+  const [showSyncProgressModal, setShowSyncProgressModal] = useState(false)
+  const [showSyncDialog, setShowSyncDialog] = useState(false)
   
   const pollIntervalRef = useRef(null)
   const syncCheckRef = useRef(false)
@@ -64,26 +69,45 @@ function Dashboard() {
   }, [isGuest])
 
   const loadInitialData = async () => {
+    if (isGuest) return
+
     try {
       setLoading(true)
-      const [statusData, statsData, appsData] = await Promise.all([
+      // Use Promise.allSettled to handle partial failures gracefully
+      const results = await Promise.allSettled([
         gmailService.getStatus().catch(() => ({ connected: false })),
         gmailService.getStats().catch(() => null),
         gmailService.getApplications().catch(() => ({ applications: [], total: 0, counts: {} })),
       ])
 
-      setGmailStatus(statusData)
-      setStats(statsData)
-      setApplications(appsData.applications || [])
+      const [statusResult, statsResult, appsResult] = results
       
-      // Check if sync is running (guard against undefined)
-      const existingSyncId = statusData?.syncJobId || statusData?.sync_id
-      if (existingSyncId) {
-        setShowSyncLogModal(true)
-        startProgressPolling(existingSyncId)
+      // Only update state if requests succeeded
+      if (statusResult.status === 'fulfilled') {
+        setGmailStatus(statusResult.value)
+      }
+      if (statsResult.status === 'fulfilled' && statsResult.value) {
+        setStats(statsResult.value)
+      }
+      if (appsResult.status === 'fulfilled') {
+        setApplications(appsResult.value.applications || [])
+      }
+      
+      // Check if sync is running (new job-based system) - don't block on this
+      try {
+        const status = await gmailService.getSyncStatus()
+        if (status.jobId && (status.status === 'RUNNING' || status.status === 'QUEUED')) {
+          setSyncJobId(status.jobId)
+          setShowSyncDialog(true)
+          setShowSyncProgressModal(true)
+        }
+      } catch (statusErr) {
+        // Ignore status check errors - non-critical
+        console.log('Status check failed (non-critical):', statusErr)
       }
     } catch (err) {
-      setError(err.message || 'Failed to load dashboard data')
+      console.error('Error loading initial data:', err)
+      // Don't set error state - allow partial data to display
     } finally {
       setLoading(false)
     }
@@ -187,52 +211,70 @@ function Dashboard() {
 
   const handleStartSync = async () => {
     // Prevent double execution
-    if (syncCheckRef.current || syncState.isRunning) {
+    if (syncCheckRef.current) {
+      console.log('Sync check already in progress')
       return
     }
+    
+    // If modal is already open with a running job, just focus it
+    if (showSyncProgressModal && syncJobId) {
+      console.log('Sync modal already open with jobId:', syncJobId, '- focusing existing modal')
+      // Modal is already showing, just return
+      return
+    }
+    
     syncCheckRef.current = true
 
     try {
       setError(null)
+      console.log('🟢 Starting sync - opening modal immediately...')
       
-      // Step 1: Call POST /gmail/sync
-      const result = await gmailService.startSync()
+      // CRITICAL: Show dialog FIRST, before any API calls
+      // This ensures the dialog appears instantly when button is clicked
+      setShowSyncDialog(true)
+      setShowSyncProgressModal(true) // Keep for backward compatibility
+      setSyncJobId(null) // Reset jobId so dialog shows "Starting..." state
       
-      // Step 2: Read sync_id from response (normalized by gmailService)
-      const syncId = result.sync_id
+      // Small delay to ensure React has rendered the dialog
+      await new Promise(resolve => setTimeout(resolve, 50))
       
-      // Step 3: Validate sync_id exists
-      if (!syncId) {
-        throw new Error('Sync started but no sync_id returned from backend')
+      // Check for existing job first
+      console.log('Checking for existing sync job...')
+      try {
+        const status = await gmailService.getSyncStatus()
+        console.log('Sync status:', status)
+        
+        if (status.jobId && (status.status === 'RUNNING' || status.status === 'QUEUED')) {
+          // Attach to existing job
+          console.log('Attaching to existing job:', status.jobId)
+          setSyncJobId(status.jobId)
+          setShowSyncDialog(true)
+          return
+        }
+      } catch (statusErr) {
+        console.log('Status check failed, proceeding with new sync:', statusErr)
+        // Continue to start new sync if status check fails
       }
       
-      // Step 4: Save sync_id in state and start polling
-      setSyncState(prev => ({
-        ...prev,
-        syncId,
-        isRunning: true,
-      }))
+      // Start new sync
+      console.log('Starting new sync job...')
+      const result = await gmailService.startSync()
+      console.log('Sync started, result:', result)
       
-      // Show sync log modal
-      setShowSyncLogModal(true)
+      if (!result.jobId) {
+        throw new Error('Sync started but no jobId returned')
+      }
       
-      startProgressPolling(syncId)
+      console.log('Setting jobId:', result.jobId)
+      setSyncJobId(result.jobId)
+      setShowSyncDialog(true) // Ensure dialog is open
     } catch (err) {
+      console.error('Sync start error:', err)
       const errorMessage = err.message || 'Failed to start sync'
       setError(errorMessage)
-      
-      // If sync is already running, try to get existing sync_id
-      if (errorMessage.includes('already running')) {
-        try {
-          const status = await gmailService.getStatus()
-          const existingSyncId = status.syncJobId || status.sync_id
-          if (existingSyncId) {
-            startProgressPolling(existingSyncId)
-          }
-        } catch (statusErr) {
-          console.error('Failed to get existing sync status:', statusErr)
-        }
-      }
+      // Keep modal open to show error
+      // setShowSyncProgressModal(false)
+      // setSyncJobId(null)
     } finally {
       syncCheckRef.current = false
     }
@@ -665,6 +707,47 @@ function Dashboard() {
         </div>
       </div>
 
+      {/* New Sync Dialog - Shows immediately on sync button click */}
+      <SyncDialog
+        jobId={syncJobId}
+        isOpen={showSyncDialog}
+        onClose={() => {
+          setShowSyncDialog(false)
+          // Don't clear jobId - allow reattaching if sync is still running
+        }}
+        onComplete={async (progress) => {
+          console.log('User clicked View Dashboard, closing dialog and reloading data:', progress)
+          setShowSyncDialog(false)
+          setShowSyncProgressModal(false)
+          // Load data in background, don't block on errors
+          try {
+            await loadInitialData()
+          } catch (err) {
+            console.error('Failed to reload data after sync:', err)
+            // Don't show error to user - sync completed successfully
+          }
+        }}
+      />
+      
+      {/* Legacy SyncProgressModal - kept for backward compatibility */}
+      {showSyncProgressModal && !showSyncDialog && (
+        <SyncProgressModal
+          jobId={syncJobId}
+          onClose={() => {
+            setShowSyncProgressModal(false)
+          }}
+          onComplete={async (progress) => {
+            setShowSyncProgressModal(false)
+            setShowSyncCompleteModal(true)
+            try {
+              await loadInitialData()
+            } catch (err) {
+              console.error('Failed to reload data after sync:', err)
+            }
+          }}
+        />
+      )}
+      {!showSyncProgressModal && console.log('🔴 NOT rendering SyncProgressModal - showSyncProgressModal is false')}
       {showSyncLogModal && (
         <SyncLogModal
           progress={syncState.progress}

@@ -1,0 +1,133 @@
+# Company Domain Mappings
+# Format: domain -> canonical_company_name
+# Aliases and subsidiaries are listed under each company
+
+meta.com:
+  canonical: Meta
+  aliases: [Facebook, fb.com]
+  subsidiaries: [Instagram, WhatsApp, Oculus]
+
+google.com:
+  canonical: Google
+  aliases: [Alphabet, alphabet.com, goog.com]
+  subsidiaries: [YouTube, Waymo, DeepMind]
+
+amazon.com:
+  canonical: Amazon
+  aliases: [amazon.com, aws.amazon.com]
+  subsidiaries: [AWS, Twitch, Whole Foods]
+
+microsoft.com:
+  canonical: Microsoft
+  aliases: [msft.com]
+  subsidiaries: [LinkedIn, GitHub, Xbox]
+
+apple.com:
+  canonical: Apple
+  aliases: []
+  subsidiaries: []
+
+netflix.com:
+  canonical: Netflix
+  aliases: []
+  subsidiaries: []
+
+tesla.com:
+  canonical: Tesla
+  aliases: []
+  subsidiaries: []
+
+nvidia.com:
+  canonical: NVIDIA
+  aliases: []
+  subsidiaries: []
+
+salesforce.com:
+  canonical: Salesforce
+  aliases: []
+  subsidiaries: []
+
+oracle.com:
+  canonical: Oracle
+  aliases: []
+  subsidiaries: []
+
+adobe.com:
+  canonical: Adobe
+  aliases: []
+  subsidiaries: []
+
+ibm.com:
+  canonical: IBM
+  aliases: []
+  subsidiaries: []
+
+intel.com:
+  canonical: Intel
+  aliases: []
+  subsidiaries: []
+
+amd.com:
+  canonical: AMD
+  aliases: []
+  subsidiaries: []
+
+cisco.com:
+  canonical: Cisco
+  aliases: []
+  subsidiaries: []
+
+vmware.com:
+  canonical: VMware
+  aliases: []
+  subsidiaries: []
+
+uber.com:
+  canonical: Uber
+  aliases: []
+  subsidiaries: []
+
+airbnb.com:
+  canonical: Airbnb
+  aliases: []
+  subsidiaries: []
+
+stripe.com:
+  canonical: Stripe
+  aliases: []
+  subsidiaries: []
+
+shopify.com:
+  canonical: Shopify
+  aliases: []
+  subsidiaries: []
+
+square.com:
+  canonical: Square
+  aliases: [Block]
+  subsidiaries: []
+
+palantir.com:
+  canonical: Palantir
+  aliases: []
+  subsidiaries: []
+
+databricks.com:
+  canonical: Databricks
+  aliases: []
+  subsidiaries: []
+
+snowflake.com:
+  canonical: Snowflake
+  aliases: []
+  subsidiaries: []
+
+openai.com:
+  canonical: OpenAI
+  aliases: []
+  subsidiaries: []
+
+anthropic.com:
+  canonical: Anthropic
+  aliases: []
+  subsidiaries: []

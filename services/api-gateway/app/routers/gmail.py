@@ -2,7 +2,10 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 import httpx
 import os
+import logging
 from app.middleware.auth_middleware import verify_token
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -34,75 +37,113 @@ async def get_status(token_data: dict = Depends(verify_token)):
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Gmail service unavailable")
 
-@router.post("/sync")
-async def start_sync(token_data: dict = Depends(verify_token)):
-    """
-    Start Gmail sync - MANDATORY endpoint per requirements
-    POST /api/gmail/sync
-    Authorization: Bearer <backend_jwt>
-    
-    Response format (exact):
-    {
-      "status": "running | completed | failed",
-      "total_emails": number,
-      "fetched_emails": number,
-      "classified": {
-        "applied": number,
-        "rejected": number,
-        "interview": number,
-        "offer": number,
-        "ghosted": number,
-        "skipped": number
-      },
-      "sync_id": string  # Required for frontend polling
-    }
-    """
+@router.post("/sync/start")
+async def start_sync_job(token_data: dict = Depends(verify_token)):
+    """Start a new Gmail sync job or return existing running job."""
     user_id = token_data.get("sub")
-    user_email = token_data.get("email")  # Get email from JWT for validation
+    user_email = token_data.get("email")
     
     if not user_email:
         raise HTTPException(status_code=400, detail="User email not found in token")
     
     try:
-        async with httpx.AsyncClient() as client:
+        # No timeout - sync start should return immediately after queuing background job
+        # Use a very high timeout value (1 hour) to effectively disable timeout
+        timeout_config = httpx.Timeout(3600.0, connect=60.0)  # 1 hour total, 60s connect
+        async with httpx.AsyncClient(timeout=timeout_config) as client:
+            logger.info(f"Calling Gmail service at {GMAIL_SERVICE_URL}/gmail/sync/start for user {user_email}")
             response = await client.post(
-                f"{GMAIL_SERVICE_URL}/gmail/sync",
-                json={"user_id": user_id, "user_email": user_email}
+                f"{GMAIL_SERVICE_URL}/gmail/sync/start",
+                json={"user_id": user_id, "user_email": user_email},
+                timeout=timeout_config
             )
             
+            logger.info(f"Gmail service response status: {response.status_code}")
+            
             if response.status_code == 409:
-                # Sync already running
-                raise HTTPException(status_code=409, detail=response.json().get("detail", "Sync already running"))
+                try:
+                    detail = response.json().get("detail", "Sync already running")
+                except:
+                    detail = "Sync already running"
+                raise HTTPException(status_code=409, detail=detail)
             
             response.raise_for_status()
-            return response.json()
+            
+            try:
+                return response.json()
+            except Exception as json_error:
+                logger.error(f"Failed to parse JSON response: {json_error}, response text: {response.text[:200]}")
+                raise HTTPException(status_code=503, detail=f"Gmail service returned invalid response: {str(json_error)}")
+                
     except HTTPException:
         raise
+    except httpx.TimeoutException as e:
+        logger.error(f"Gmail service timeout after 1 hour: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Gmail service is not responding. This should not happen - the sync start endpoint should return immediately. Please check service logs.")
+    except httpx.ConnectError as e:
+        logger.error(f"Gmail service connection error: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Gmail service connection failed. Is the service running at {GMAIL_SERVICE_URL}? Error: {str(e)}")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Gmail service HTTP error: {e.response.status_code}, {str(e)}")
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except:
+            detail = str(e)
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+    except httpx.RequestError as e:
+        logger.error(f"Gmail service request error: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Gmail service request failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error calling Gmail service: {type(e).__name__}: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+@router.get("/sync/status")
+async def get_sync_status(token_data: dict = Depends(verify_token)):
+    """Get current sync status for user."""
+    user_id = token_data.get("sub")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/gmail/sync/status",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
 
-@router.get("/sync/progress/{sync_id}")
-async def get_sync_progress(sync_id: str, token_data: dict = Depends(verify_token)):
+@router.post("/sync")
+async def start_sync(token_data: dict = Depends(verify_token)):
     """
-    Get sync progress (for polling)
+    Start Gmail sync - Legacy endpoint (for backward compatibility)
+    Redirects to /sync/start
+    """
+    # Redirect to new endpoint
+    return await start_sync_job(token_data)
+
+@router.get("/sync/progress/{job_id}")
+async def get_sync_progress(job_id: str, token_data: dict = Depends(verify_token)):
+    """
+    Get sync progress (for polling) - uses database job system
     Returns real-time counts from backend matching exact response format
     
-    STRICT: sync_id must be valid (not undefined/null/empty)
+    STRICT: job_id must be valid (not undefined/null/empty)
     """
-    # Validate sync_id before forwarding
-    if not sync_id or sync_id in ['undefined', 'null', '']:
+    # Validate job_id before forwarding
+    if not job_id or job_id in ['undefined', 'null', '']:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid sync_id: '{sync_id}'. Cannot poll progress."
+            detail=f"Invalid job_id: '{job_id}'. Cannot poll progress."
         )
     
     user_id = token_data.get("sub")
     
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Forward sync_id as job_id to gmail-connector (internal naming)
+            # Try database-based endpoint first
             response = await client.get(
-                f"{GMAIL_SERVICE_URL}/gmail/sync/progress/{sync_id}",
+                f"{GMAIL_SERVICE_URL}/gmail/sync/progress/{job_id}",
                 params={"user_id": user_id}
             )
             
@@ -110,7 +151,7 @@ async def get_sync_progress(sync_id: str, token_data: dict = Depends(verify_toke
             if response.status_code == 404:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Sync job '{sync_id}' not found. It may have completed or been cleared."
+                    detail=f"Sync job '{job_id}' not found. It may have completed or been cleared."
                 )
             
             response.raise_for_status()
@@ -137,6 +178,30 @@ async def get_sync_progress(sync_id: str, token_data: dict = Depends(verify_toke
             detail=f"Gmail service connection failed: {str(e)}"
         )
 
+@router.get("/sync/logs/{job_id}")
+async def get_sync_logs(
+    job_id: str,
+    after_seq: int = Query(0),
+    token_data: dict = Depends(verify_token)
+):
+    """Get sync logs for a job."""
+    # Validate job_id
+    if not job_id or job_id in ['undefined', 'null', '']:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    
+    user_id = token_data.get("sub")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/gmail/sync/logs/{job_id}",
+                params={"user_id": user_id, "after_seq": after_seq}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
 @router.get("/applications")
 async def get_applications(
     search: str = Query(None),
@@ -157,7 +222,8 @@ async def get_applications(
         if status:
             params["status"] = status
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # No timeout - sync start is a quick operation that just queues a background job
+        async with httpx.AsyncClient(timeout=None) as client:
             response = await client.get(
                 f"{GMAIL_SERVICE_URL}/applications",
                 params=params
