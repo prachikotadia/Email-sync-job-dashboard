@@ -19,11 +19,12 @@ export const gmailService = {
 
   /**
    * Start Gmail sync
-   * Returns sync job ID for tracking
+   * Returns sync_id and status
+   * Contract: { "sync_id": "uuid", "status": "started" }
    */
   async startSync() {
     try {
-      const response = await apiClient.post('/gmail/sync/start')
+      const response = await apiClient.post('/gmail/sync')
       return response.data
     } catch (error) {
       if (error.response?.status === 409) {
@@ -36,16 +37,26 @@ export const gmailService = {
   },
 
   /**
-   * Get sync progress (polling endpoint)
+   * Get sync status (polling endpoint)
    * Returns real-time counts from backend
+   * Contract: { "status": "running|completed|failed", "emails_fetched": ..., "counts": {...}, ... }
    */
-  async getSyncProgress(jobId) {
+  async getSyncStatus(syncId) {
     try {
-      const response = await apiClient.get(`/gmail/sync/progress/${jobId}`)
+      const response = await apiClient.get('/gmail/sync/status', {
+        params: { sync_id: syncId }
+      })
       return response.data
     } catch (error) {
       throw error
     }
+  },
+
+  /**
+   * Legacy method - redirects to getSyncStatus
+   */
+  async getSyncProgress(jobId) {
+    return this.getSyncStatus(jobId)
   },
 
   /**

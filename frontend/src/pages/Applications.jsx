@@ -51,28 +51,68 @@ export default function Applications() {
     loadApplications()
   }, [loadApplications])
 
-  // Auto-refresh after sync completes (poll for sync status)
+  // Auto-refresh after sync completes (listen for sync completion)
   useEffect(() => {
     if (isGuest) return
+
+    let syncCheckInterval = null
+    let lastSyncJobId = null
 
     const checkSyncStatus = async () => {
       try {
         const status = await gmailService.getStatus()
-        // If sync just completed, reload applications
-        if (status.connected && !status.syncJobId) {
-          // Small delay to ensure backend has processed
+        const currentSyncJobId = status.syncJobId
+
+        // If sync was running and now completed
+        if (lastSyncJobId && !currentSyncJobId) {
+          // Sync just completed - reload applications
           setTimeout(() => {
             loadApplications()
           }, 1000)
+        }
+
+        lastSyncJobId = currentSyncJobId
+
+        // If sync is running, poll its status
+        if (currentSyncJobId) {
+          try {
+            const syncStatus = await gmailService.getSyncStatus(currentSyncJobId)
+            if (syncStatus.status === 'completed') {
+              // Sync completed - reload applications
+              setTimeout(() => {
+                loadApplications()
+              }, 1000)
+              if (syncCheckInterval) {
+                clearInterval(syncCheckInterval)
+                syncCheckInterval = null
+              }
+            } else if (syncStatus.status === 'failed') {
+              setError(syncStatus.errors?.[0] || 'Sync failed')
+              if (syncCheckInterval) {
+                clearInterval(syncCheckInterval)
+                syncCheckInterval = null
+              }
+            }
+          } catch (err) {
+            // Ignore errors in sync status check
+          }
         }
       } catch (err) {
         // Ignore errors in status check
       }
     }
 
-    // Poll every 5 seconds when on Applications page
-    const interval = setInterval(checkSyncStatus, 5000)
-    return () => clearInterval(interval)
+    // Poll every 3 seconds when on Applications page
+    syncCheckInterval = setInterval(checkSyncStatus, 3000)
+    
+    // Initial check
+    checkSyncStatus()
+
+    return () => {
+      if (syncCheckInterval) {
+        clearInterval(syncCheckInterval)
+      }
+    }
   }, [isGuest, loadApplications])
 
   // Normalize category for display (backend returns uppercase)

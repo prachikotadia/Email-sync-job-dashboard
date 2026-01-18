@@ -84,7 +84,7 @@ async def get_status(user_id: str = Query(...), db: Session = Depends(get_db)):
         # Check for active lock
         lock_info = None
         if sync_state and sync_state.is_sync_running:
-            if sync_state.sync_lock_expires_at and sync_state.sync_lock_expires_at > datetime.utcnow():
+            if sync_state.sync_lock_expires_at and sync_state.sync_lock_expires_at > datetime.now(timezone.utc):
                 lock_info = {
                     "job_id": sync_state.lock_job_id,
                     "reason": "Sync in progress",
@@ -131,7 +131,7 @@ async def start_sync(
     # Check for existing lock
     sync_state = db.query(SyncState).filter(SyncState.user_id == user.id).first()
     if sync_state and sync_state.is_sync_running:
-        if sync_state.sync_lock_expires_at and sync_state.sync_lock_expires_at > datetime.utcnow():
+        if sync_state.sync_lock_expires_at and sync_state.sync_lock_expires_at > datetime.now(timezone.utc):
             raise HTTPException(
                 status_code=409,
                 detail=f"Sync already running: {sync_state.lock_job_id}"
@@ -150,7 +150,7 @@ async def start_sync(
         db.add(sync_state)
     
     sync_state.is_sync_running = True
-    sync_state.sync_lock_expires_at = datetime.utcnow() + timedelta(minutes=10)
+    sync_state.sync_lock_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
     sync_state.lock_job_id = job_id
     db.commit()
     
@@ -169,7 +169,7 @@ async def start_sync(
     # Start sync in background
     background_tasks.add_task(run_sync, job_id, user.id, user_email, db)
     
-    return {"job_id": job_id, "status": "started"}
+    return {"sync_id": job_id, "status": "started"}
 
 async def run_sync(job_id: str, user_id: int, user_email: str, db: Session):
     """
@@ -216,7 +216,7 @@ async def run_sync(job_id: str, user_id: int, user_email: str, db: Session):
         # Update sync state
         final_progress = sync_jobs[job_id]
         sync_state.gmail_history_id = sync_engine.get_latest_history_id()
-        sync_state.last_synced_at = datetime.utcnow()
+        sync_state.last_synced_at = datetime.now(timezone.utc)
         sync_state.is_sync_running = False
         sync_state.sync_lock_expires_at = None
         db.commit()
@@ -224,13 +224,14 @@ async def run_sync(job_id: str, user_id: int, user_email: str, db: Session):
         # Mark as completed
         sync_jobs[job_id]["status"] = "completed"
         
-        cl = final_progress.get("classified", {})
+        # Get final stats with uppercase categories
+        final_stats = calculate_stats(db, user_id)
         logger.info(
             f"Fetched: {final_progress['total_fetched']} emails. "
             f"Job-related candidates: {final_progress.get('candidate_job_emails', 0)}. "
-            f"Applied: {cl.get('applied', 0)}, Rejected: {cl.get('rejected', 0)}, "
-            f"Interview: {cl.get('interview', 0)}, Offer: {cl.get('offer', 0)}, "
-            f"Ghosted: {cl.get('ghosted', 0)}. Skipped: {final_progress.get('skipped', 0)}."
+            f"APPLIED: {final_stats.get('APPLIED', 0)}, REJECTED: {final_stats.get('REJECTED', 0)}, "
+            f"INTERVIEW: {final_stats.get('INTERVIEW', 0)}, OFFER_ACCEPTED: {final_stats.get('OFFER_ACCEPTED', 0)}, "
+            f"GHOSTED: {final_stats.get('GHOSTED', 0)}. Skipped: {final_progress.get('skipped', 0)}."
         )
         
     except Exception as e:
@@ -245,34 +246,68 @@ async def run_sync(job_id: str, user_id: int, user_email: str, db: Session):
             sync_state.sync_lock_expires_at = None
             db.commit()
 
-@app.get("/sync/progress/{job_id}")
-async def get_sync_progress(job_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
+@app.get("/sync/status")
+async def get_sync_status(sync_id: str = Query(..., alias="sync_id"), user_id: str = Query(...), db: Session = Depends(get_db)):
     """
-    Get sync progress (for polling)
+    Get sync status (for polling)
     Returns real-time counts from backend
+    Strict API contract format
     """
-    if job_id not in sync_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+    if sync_id not in sync_jobs:
+        raise HTTPException(status_code=404, detail="Sync job not found")
     
-    job = sync_jobs[job_id]
+    job = sync_jobs[sync_id]
     
     # Validate user (user_id is email from JWT)
     if job.get("user_email") != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    # Get applications count from DB
-    applications_count = db.query(Application).filter(Application.user_id == job["user_id"]).count()
+    # Get real counts from DB (uppercase categories)
+    stats = calculate_stats(db, job["user_id"])
+    
+    # Normalize classified counts to uppercase
+    classified = job.get("classified", {})
+    classified_normalized = {}
+    for key, value in classified.items():
+        key_upper = key.upper()
+        if key_upper == "OFFER" or key_upper == "ACCEPTED":
+            key_upper = "OFFER_ACCEPTED"
+        classified_normalized[key_upper] = value
+    
+    # Map to contract format (lowercase for display, but backend uses uppercase)
+    counts_display = {
+        "applied": stats.get("APPLIED", 0),
+        "rejected": stats.get("REJECTED", 0),
+        "interview": stats.get("INTERVIEW", 0),
+        "offer": stats.get("OFFER_ACCEPTED", 0),
+        "ghosted": stats.get("GHOSTED", 0),
+    }
+    
+    status = job["status"]
+    if status == "running":
+        status = "running"
+    elif status == "completed":
+        status = "completed"
+    elif status == "failed":
+        status = "failed"
+    else:
+        status = "running"  # Default
     
     return {
-        "status": job["status"],
-        "total_scanned": job["total_scanned"],
-        "total_fetched": job["total_fetched"],
-        "candidate_job_emails": job.get("candidate_job_emails", 0),
-        "classified": job["classified"],
+        "status": status,
+        "emails_fetched": job.get("total_fetched", 0),
+        "applications_found": db.query(Application).filter(Application.user_id == job["user_id"]).count(),
+        "counts": counts_display,
         "skipped": job.get("skipped", 0),
-        "applications_count": applications_count,
-        "stats": calculate_stats(db, job["user_id"]),
+        "errors": [job["error"]] if job.get("error") else [],
     }
+
+@app.get("/sync/progress/{job_id}")
+async def get_sync_progress(job_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
+    """
+    Legacy endpoint - redirects to /sync/status
+    """
+    return await get_sync_status(sync_id=job_id, user_id=user_id, db=db)
 
 def calculate_stats(db: Session, user_id) -> dict:
     """

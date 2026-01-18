@@ -98,38 +98,46 @@ function Dashboard() {
 
     pollIntervalRef.current = setInterval(async () => {
       try {
-        const progress = await gmailService.getSyncProgress(jobId)
+        const status = await gmailService.getSyncStatus(jobId)
         setSyncState(prev => ({
           ...prev,
-          progress,
+          progress: status,
         }))
 
-        // Update stats and applications in real-time
-        if (progress.stats) {
-          setStats(progress.stats)
-        }
-        if (progress.applications) {
-          setApplications(progress.applications)
+        // Update stats from status.counts (backend is source of truth)
+        if (status.counts) {
+          // Convert to stats format
+          setStats({
+            total: status.applications_found || 0,
+            applied: status.counts.applied || 0,
+            rejected: status.counts.rejected || 0,
+            interview: status.counts.interview || 0,
+            offer: status.counts.offer || 0,
+            ghosted: status.counts.ghosted || 0,
+          })
         }
 
         // Stop polling if sync is complete
-        if (progress.status === 'completed' || progress.status === 'failed') {
+        if (status.status === 'completed' || status.status === 'failed') {
           if (pollIntervalRef.current) {
             clearInterval(pollIntervalRef.current)
             pollIntervalRef.current = null
           }
           setSyncState(prev => ({ ...prev, isRunning: false }))
-          if (progress.status === 'completed') {
+          if (status.status === 'completed') {
             setShowSyncCompleteModal(true)
+            // Reload all data after sync completes
+            await loadInitialData()
+          } else if (status.status === 'failed') {
+            setError(status.errors?.[0] || 'Sync failed')
           }
-          loadInitialData()
         }
       } catch (err) {
-        console.error('Progress polling error:', err)
+        console.error('Sync status polling error:', err)
         // Continue polling even on error
       }
     }, 2000) // Poll every 2 seconds
-  }, [])
+  }, [loadInitialData])
 
   const handleStartSync = async () => {
     if (syncCheckRef.current) return // Prevent double execution
@@ -138,11 +146,17 @@ function Dashboard() {
     try {
       setError(null)
       const result = await gmailService.startSync()
-      startProgressPolling(result.jobId)
+      // Contract: { "sync_id": "uuid", "status": "started" }
+      const syncId = result.sync_id || result.jobId
+      if (syncId) {
+        startProgressPolling(syncId)
+      } else {
+        throw new Error('No sync_id returned from server')
+      }
     } catch (err) {
       setError(err.message || 'Failed to start sync')
       if (err.message.includes('already running')) {
-        // Try to get the existing job ID
+        // Try to get the existing sync ID
         const status = await gmailService.getStatus()
         if (status.syncJobId) {
           startProgressPolling(status.syncJobId)

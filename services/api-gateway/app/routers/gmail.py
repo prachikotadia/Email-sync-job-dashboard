@@ -34,11 +34,12 @@ async def get_status(token_data: dict = Depends(verify_token)):
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Gmail service unavailable")
 
-@router.post("/sync/start")
+@router.post("/sync")
 async def start_sync(token_data: dict = Depends(verify_token)):
     """
     Start Gmail sync
-    Returns job ID for progress tracking
+    Returns sync_id and status
+    Contract: { "sync_id": "uuid", "status": "started" }
     """
     user_id = token_data.get("sub")
     user_email = token_data.get("email")  # Get email from JWT for validation
@@ -58,30 +59,50 @@ async def start_sync(token_data: dict = Depends(verify_token)):
                 raise HTTPException(status_code=409, detail=response.json().get("detail", "Sync already running"))
             
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            # Map job_id to sync_id for contract compliance
+            return {
+                "sync_id": data.get("job_id") or data.get("sync_id"),
+                "status": data.get("status", "started")
+            }
     except HTTPException:
         raise
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
 
-@router.get("/sync/progress/{job_id}")
-async def get_sync_progress(job_id: str, token_data: dict = Depends(verify_token)):
+@router.post("/sync/start")
+async def start_sync_legacy(token_data: dict = Depends(verify_token)):
     """
-    Get sync progress (for polling)
+    Legacy endpoint - redirects to /sync
+    """
+    return await start_sync(token_data)
+
+@router.get("/sync/status")
+async def get_sync_status(sync_id: str = Query(..., alias="sync_id"), token_data: dict = Depends(verify_token)):
+    """
+    Get sync status (for polling)
     Returns real-time counts from backend
+    Contract format: { "status": "running|completed|failed", "emails_fetched": ..., "counts": {...}, ... }
     """
     user_id = token_data.get("sub")
     
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{GMAIL_SERVICE_URL}/sync/progress/{job_id}",
-                params={"user_id": user_id}
+                f"{GMAIL_SERVICE_URL}/sync/status",
+                params={"sync_id": sync_id, "user_id": user_id}
             )
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+@router.get("/sync/progress/{job_id}")
+async def get_sync_progress(job_id: str, token_data: dict = Depends(verify_token)):
+    """
+    Legacy endpoint - redirects to /sync/status
+    """
+    return await get_sync_status(sync_id=job_id, token_data=token_data)
 
 @router.get("/applications")
 async def get_applications(
