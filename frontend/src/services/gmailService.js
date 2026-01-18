@@ -62,6 +62,7 @@ export const gmailService = {
   /**
    * Get all applications
    * NO pagination limits - returns ALL fetched emails
+   * Response includes gmail_web_url for opening emails
    */
   async getApplications(filters = {}) {
     try {
@@ -81,6 +82,10 @@ export const gmailService = {
         warning: response.data.warning, // Backend may warn if data is partial
       }
     } catch (error) {
+      if (error.response?.status === 503) {
+        // Service unavailable - return empty
+        return { applications: [], total: 0, counts: {}, warning: 'Service unavailable' }
+      }
       throw error
     }
   },

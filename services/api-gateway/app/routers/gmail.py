@@ -92,6 +92,7 @@ async def get_applications(
     """
     Get all applications
     NO pagination limits - returns ALL fetched emails
+    Response includes gmail_web_url for opening emails
     """
     user_id = token_data.get("sub")
     
@@ -102,13 +103,40 @@ async def get_applications(
         if status:
             params["status"] = status
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 f"{GMAIL_SERVICE_URL}/applications",
                 params=params
             )
             response.raise_for_status()
             return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+
+@router.get("/applications/{app_id}")
+async def get_application(
+    app_id: int,
+    token_data: dict = Depends(verify_token)
+):
+    """
+    Get a specific application by ID
+    Returns full application data with Gmail web URL
+    """
+    user_id = token_data.get("sub")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/applications/{app_id}",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Application not found")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Failed to get application: {str(e)}")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
 

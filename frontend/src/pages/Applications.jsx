@@ -1,69 +1,166 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { gmailService } from '../services/gmailService'
-import { MOCK_APPLICATIONS } from '../mock/applications.mock'
-import { IconDownload, IconList, IconGridSmall, IconBriefcase, IconSearch } from '../components/icons'
+import { IconDownload, IconList, IconGridSmall, IconBriefcase, IconSearch, IconAlertCircle, IconExternalLink } from '../components/icons'
 import '../styles/Applications.css'
 
-const PAGE_SIZE = 10
+// Category mapping - only 5 allowed categories (uppercase from backend)
+const CATEGORY_LABELS = {
+  APPLIED: 'Applied',
+  REJECTED: 'Rejected',
+  INTERVIEW: 'Interview',
+  OFFER_ACCEPTED: 'Offer / Accepted',
+  GHOSTED: 'Ghosted',
+}
+
+const CATEGORY_OPTIONS = ['All Statuses', ...Object.values(CATEGORY_LABELS)]
 
 export default function Applications() {
-  const { isGuest } = useAuth()
-  const [applications, setApplications] = useState(() => (isGuest ? MOCK_APPLICATIONS : []))
-  const [loading, setLoading] = useState(() => !isGuest)
+  const { user, isGuest } = useAuth()
+  const [applications, setApplications] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('All Statuses')
   const [viewMode, setViewMode] = useState('list') // 'list' | 'grid'
-  const [page, setPage] = useState(1)
 
-  useEffect(() => {
+  // Load applications from backend
+  const loadApplications = useCallback(async () => {
     if (isGuest) {
+      setApplications([])
       setLoading(false)
       return
     }
-    let cancelled = false
-    const load = async () => {
-      try {
-        const res = await gmailService.getApplications().catch(() => ({ applications: [], total: 0 }))
-        if (!cancelled) {
-          setApplications(res.applications || [])
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
+
+    try {
+      setLoading(true)
+      setError(null)
+      const res = await gmailService.getApplications()
+      setApplications(res.applications || [])
+    } catch (err) {
+      console.error('Error loading applications:', err)
+      setError(err.message || 'Failed to load applications')
+      setApplications([])
+    } finally {
+      setLoading(false)
     }
-    load()
-    return () => { cancelled = true }
   }, [isGuest])
 
-  const statuses = useMemo(() => {
-    const s = new Set(applications.map((a) => a.status).filter(Boolean))
-    return ['All Statuses', ...Array.from(s).sort()]
-  }, [applications])
+  // Initial load
+  useEffect(() => {
+    loadApplications()
+  }, [loadApplications])
 
+  // Auto-refresh after sync completes (poll for sync status)
+  useEffect(() => {
+    if (isGuest) return
+
+    const checkSyncStatus = async () => {
+      try {
+        const status = await gmailService.getStatus()
+        // If sync just completed, reload applications
+        if (status.connected && !status.syncJobId) {
+          // Small delay to ensure backend has processed
+          setTimeout(() => {
+            loadApplications()
+          }, 1000)
+        }
+      } catch (err) {
+        // Ignore errors in status check
+      }
+    }
+
+    // Poll every 5 seconds when on Applications page
+    const interval = setInterval(checkSyncStatus, 5000)
+    return () => clearInterval(interval)
+  }, [isGuest, loadApplications])
+
+  // Normalize category for display (backend returns uppercase)
+  const normalizeCategory = (category) => {
+    if (!category) return null
+    const cat = category.toUpperCase()
+    if (cat === 'ACCEPTED' || cat === 'OFFER') return 'OFFER_ACCEPTED'
+    return cat
+  }
+
+  // Get category label
+  const getCategoryLabel = (category) => {
+    const normalized = normalizeCategory(category)
+    return CATEGORY_LABELS[normalized] || category || 'Unknown'
+  }
+
+  // Filter applications
   const filtered = useMemo(() => {
     let list = applications
+
+    // Search filter
     if (search.trim()) {
       const q = search.toLowerCase()
       list = list.filter(
         (a) =>
-          (a.company || '').toLowerCase().includes(q) ||
-          (a.role || '').toLowerCase().includes(q)
+          (a.company_name || '').toLowerCase().includes(q) ||
+          (a.role || '').toLowerCase().includes(q) ||
+          (a.subject || '').toLowerCase().includes(q)
       )
     }
+
+    // Status filter (match by label)
     if (statusFilter && statusFilter !== 'All Statuses') {
-      list = list.filter((a) => a.status === statusFilter)
+      list = list.filter((a) => {
+        const normalized = normalizeCategory(a.category)
+        const label = CATEGORY_LABELS[normalized]
+        return label === statusFilter
+      })
     }
+
     return list
   }, [applications, search, statusFilter])
 
-  const total = filtered.length
-  const start = (page - 1) * PAGE_SIZE
-  const end = Math.min(start + PAGE_SIZE, total)
-  const pageItems = filtered.slice(start, end)
+  // Handle application click - open Gmail
+  const handleApplicationClick = (app) => {
+    if (app.gmail_web_url) {
+      window.open(app.gmail_web_url, '_blank', 'noopener,noreferrer')
+    } else if (app.gmail_message_id) {
+      // Fallback: construct URL if web_url is missing
+      const gmailUrl = `https://mail.google.com/mail/u/0/#inbox/${app.gmail_message_id}`
+      window.open(gmailUrl, '_blank', 'noopener,noreferrer')
+    } else {
+      setError('Gmail link not available for this application')
+    }
+  }
 
-  if (loading) {
-    return <div className="applications-loading">Loading applications...</div>
+  // Format date
+  const formatDate = (dateString) => {
+    if (!dateString) return '—'
+    try {
+      const date = new Date(dateString)
+      return date.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      })
+    } catch {
+      return '—'
+    }
+  }
+
+  if (isGuest) {
+    return (
+      <div className="applications-page-perfect">
+        <div className="dashboard-header-section">
+          <div className="dashboard-title-area">
+            <h1 className="dashboard-main-title">Applications</h1>
+            <p className="dashboard-subtitle">Track and manage your pipeline</p>
+          </div>
+        </div>
+        <div className="content-card-perfect">
+          <div className="export-guest-warning">
+            <IconAlertCircle />
+            <span>Applications are disabled in Guest Mode. Connect Gmail to view your applications.</span>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -75,15 +172,26 @@ export default function Applications() {
           <p className="dashboard-subtitle">Track and manage your pipeline</p>
         </div>
         <div className="dashboard-actions">
-          <button type="button" className="dashboard-action-btn dashboard-action-btn-secondary">
+          <button
+            type="button"
+            className="dashboard-action-btn dashboard-action-btn-secondary"
+            onClick={() => window.location.href = '/export'}
+          >
             <IconDownload />
             <span>Export</span>
           </button>
-          <button type="button" className="dashboard-action-btn">
-            Add Entry
-          </button>
         </div>
       </div>
+
+      {error && (
+        <div className="export-error">
+          <IconAlertCircle />
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)} className="error-close-btn">
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Filters Card */}
       <div className="content-card-perfect filters-card-perfect">
@@ -94,17 +202,19 @@ export default function Applications() {
               type="text"
               placeholder="Search company, role..."
               value={search}
-              onChange={(e) => { setSearch(e.target.value); setPage(1) }}
+              onChange={(e) => setSearch(e.target.value)}
               className="filter-search-input"
             />
           </div>
           <select
             value={statusFilter}
-            onChange={(e) => { setStatusFilter(e.target.value); setPage(1) }}
+            onChange={(e) => setStatusFilter(e.target.value)}
             className="filter-select"
           >
-            {statuses.map((s) => (
-              <option key={s} value={s}>{s}</option>
+            {CATEGORY_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
             ))}
           </select>
           <div className="filter-view-toggle">
@@ -137,67 +247,88 @@ export default function Applications() {
             </div>
             <div>
               <h2 className="content-card-title">All Applications</h2>
-              <p className="content-card-subtitle">{total} total applications</p>
+              <p className="content-card-subtitle">
+                {loading ? 'Loading...' : `${filtered.length} of ${applications.length} applications`}
+              </p>
             </div>
           </div>
         </div>
 
-        {pageItems.length === 0 ? (
+        {loading ? (
+          <div className="applications-loading">
+            <div className="upload-spinner" />
+            <p>Loading applications...</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="applications-empty-perfect">
             <div className="empty-icon-wrapper">
               <IconBriefcase />
             </div>
             <p className="empty-title">No records found</p>
             <p className="empty-text">
-              Try adjusting your filters or search query to find what you&apos;re looking for.
+              {applications.length === 0
+                ? 'No applications found. Sync your Gmail to see your applications.'
+                : 'Try adjusting your filters or search query to find what you\'re looking for.'}
             </p>
           </div>
         ) : (
           <div className={`applications-list-perfect applications-list-${viewMode}`}>
-            {pageItems.map((app, i) => (
-              <div key={app.id || i} className="application-item-perfect">
-                <div className="application-item-icon">
-                  <IconBriefcase />
+            {filtered.map((app) => {
+              const category = normalizeCategory(app.category)
+              const categoryLabel = getCategoryLabel(app.category)
+
+              return (
+                <div
+                  key={app.id}
+                  className="application-item-perfect application-item-clickable"
+                  onClick={() => handleApplicationClick(app)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      handleApplicationClick(app)
+                    }
+                  }}
+                  title="Click to open in Gmail"
+                >
+                  <div className="application-item-icon">
+                    <IconBriefcase />
+                  </div>
+                  <div className="application-item-info">
+                    <div className="application-company">{app.company_name || 'Unknown Company'}</div>
+                    <div className="application-meta">
+                      {app.role && <span className="application-role">{app.role}</span>}
+                      {app.role && app.received_at && <span className="application-separator">•</span>}
+                      {app.received_at && (
+                        <span className="application-date">{formatDate(app.received_at)}</span>
+                      )}
+                      <span className="application-source">Source: Gmail</span>
+                    </div>
+                  </div>
+                  <div className="application-item-right">
+                    <div className={`activity-status activity-status-${(category || 'UNKNOWN').toLowerCase()}`}>
+                      {categoryLabel}
+                    </div>
+                    <IconExternalLink className="application-gmail-link-icon" />
+                  </div>
                 </div>
-                <div className="application-item-info">
-                  <div className="application-company">{app.company || 'Unknown'}</div>
-                  <div className="application-role">{app.role || '—'}</div>
-                </div>
-                <div className={`activity-status activity-status-${(app.status || '').toLowerCase()}`}>
-                  {app.status || '—'}
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
-        {/* Pagination */}
-        <div className="applications-pagination-perfect">
-          <span className="pagination-text">
-            Showing {total === 0 ? 0 : start + 1} to {end} of {total} results
-          </span>
-          <div className="pagination-controls">
-            <button
-              type="button"
-              className="pagination-btn"
-              disabled={page <= 1}
-              onClick={() => setPage((p) => p - 1)}
-              aria-label="Previous page"
-            >
-              &lt;
-            </button>
-            <button
-              type="button"
-              className="pagination-btn"
-              disabled={end >= total}
-              onClick={() => setPage((p) => p + 1)}
-              aria-label="Next page"
-            >
-              &gt;
-            </button>
+        {/* Footer - No pagination, show total count */}
+        {!loading && filtered.length > 0 && (
+          <div className="applications-pagination-perfect">
+            <span className="pagination-text">
+              Showing all {filtered.length} application{filtered.length !== 1 ? 's' : ''}
+              {filtered.length < applications.length && ` (filtered from ${applications.length} total)`}
+            </span>
           </div>
-        </div>
+        )}
       </div>
     </div>
   )
 }
+

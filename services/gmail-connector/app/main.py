@@ -274,31 +274,51 @@ async def get_sync_progress(job_id: str, user_id: str = Query(...), db: Session 
         "stats": calculate_stats(db, job["user_id"]),
     }
 
-def calculate_stats(db: Session, user_id: int) -> dict:
+def calculate_stats(db: Session, user_id) -> dict:
     """
     Returns REAL counts from DB, never estimated.
-    Five categories: applied, rejected, interview, offer (includes legacy "accepted"), ghosted.
+    Five categories: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED (uppercase).
+    Returns format: { "APPLIED": count, "REJECTED": count, ... }
     """
+    # Query counts grouped by category
+    from sqlalchemy import func
+    results = db.query(
+        Application.category,
+        func.count(Application.id).label('count')
+    ).filter(
+        Application.user_id == user_id
+    ).group_by(Application.category).all()
+    
+    # Initialize with zeros
     stats = {
-        "total": db.query(Application).filter(Application.user_id == user_id).count(),
-        "applied": db.query(Application).filter(
-            Application.user_id == user_id, Application.category == "applied"
-        ).count(),
-        "rejected": db.query(Application).filter(
-            Application.user_id == user_id, Application.category == "rejected"
-        ).count(),
-        "interview": db.query(Application).filter(
-            Application.user_id == user_id, Application.category == "interview"
-        ).count(),
-        "offer": db.query(Application).filter(
-            Application.user_id == user_id,
-            Application.category.in_(["offer", "accepted"])
-        ).count(),
-        "ghosted": db.query(Application).filter(
-            Application.user_id == user_id, Application.category == "ghosted"
-        ).count(),
+        "APPLIED": 0,
+        "REJECTED": 0,
+        "INTERVIEW": 0,
+        "OFFER_ACCEPTED": 0,
+        "GHOSTED": 0,
     }
+    
+    # Map results (handle legacy lowercase categories)
+    for category, count in results:
+        cat_upper = category.upper() if category else None
+        if cat_upper == "OFFER" or cat_upper == "ACCEPTED":
+            cat_upper = "OFFER_ACCEPTED"
+        if cat_upper in stats:
+            stats[cat_upper] = count
+    
     return stats
+
+def _generate_gmail_web_url(message_id: str, user_email: str) -> str:
+    """
+    Generate Gmail web URL for a message
+    Format: https://mail.google.com/mail/u/0/#inbox/{message_id}
+    """
+    # Gmail web URL format
+    # For Gmail, we can use the message ID directly
+    # The URL format is: https://mail.google.com/mail/u/0/#inbox/{message_id}
+    # Or: https://mail.google.com/mail/u/0/#search/{message_id}
+    return f"https://mail.google.com/mail/u/0/#inbox/{message_id}"
+
 
 @app.get("/applications")
 async def get_applications(
@@ -310,6 +330,7 @@ async def get_applications(
     """
     Get all applications
     NO pagination limits - returns ALL fetched emails
+    Response includes gmail_web_url for opening emails
     """
     try:
         # user_id is email, get database user
@@ -328,44 +349,125 @@ async def get_applications(
             )
         
         if status:
-            query = query.filter(Application.category == status.lower())
+            # Status filter - convert to uppercase to match database
+            status_upper = status.upper()
+            if status_upper == "OFFER" or status_upper == "ACCEPTED":
+                status_upper = "OFFER_ACCEPTED"
+            query = query.filter(Application.category == status_upper)
         
         applications = query.order_by(Application.received_at.desc()).all()
         
-        # Convert to dict
-        apps_data = [
-            {
-                "id": app.id,
-                "company": app.company_name,
-                "role": app.role,
-                "status": app.category,
-                "subject": app.subject,
-                "from": app.from_email,
-                "date": app.received_at.isoformat() if app.received_at else None,
-                "snippet": app.snippet,
-            }
-            for app in applications
-        ]
-        
-        # Calculate real counts
-        counts = {}
+        # Convert to dict with all required fields (strict API contract)
+        apps_data = []
         for app in applications:
-            counts[app.category] = counts.get(app.category, 0) + 1
+            # Category must be uppercase: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED
+            category = app.category.upper() if app.category else "APPLIED"
+            if category == "ACCEPTED" or category == "OFFER":
+                category = "OFFER_ACCEPTED"
+            
+            # Use stored gmail_web_url or generate if missing
+            gmail_web_url = app.gmail_web_url if app.gmail_web_url else _generate_gmail_web_url(app.gmail_message_id, user_id)
+            
+            # Ensure gmail_thread_id is never null
+            gmail_thread_id = app.gmail_thread_id if app.gmail_thread_id else app.gmail_message_id
+            
+            apps_data.append({
+                "id": str(app.id),
+                "company_name": app.company_name or "Unknown Company",  # Ensure never null
+                "category": category,  # Uppercase: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED
+                "subject": app.subject or "No Subject",  # Ensure never null
+                "snippet": app.snippet,
+                "received_at": app.received_at.isoformat() if app.received_at else None,
+                "gmail_web_url": gmail_web_url,  # Required field
+            })
         
         return {
-            "applications": apps_data,
             "total": len(apps_data),
-            "counts": counts,
-            "warning": None,
+            "applications": apps_data,
         }
     except Exception as e:
         logger.error(f"Error getting applications: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get applications: {str(e)}")
 
+
+@app.get("/applications/{app_id}")
+async def get_application(
+    app_id: int,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Get a specific application by ID
+    Returns full application data with Gmail web URL
+    """
+    try:
+        # user_id is email, get database user
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        application = db.query(Application).filter(
+            Application.id == app_id,
+            Application.user_id == user.id
+        ).first()
+        
+        if not application:
+            raise HTTPException(status_code=404, detail="Application not found")
+        
+        # Normalize category
+        category = application.category.lower()
+        if category == "accepted":
+            category = "offer"
+        
+        # Generate Gmail web URL
+        gmail_web_url = _generate_gmail_web_url(application.gmail_message_id, user_id)
+        
+        return {
+            "id": str(application.id),
+            "company_name": application.company_name or "Unknown Company",
+            "category": category,
+            "received_at": application.received_at.isoformat() if application.received_at else None,
+            "gmail_message_id": application.gmail_message_id,
+            "gmail_thread_id": application.gmail_thread_id,
+            "gmail_web_url": gmail_web_url,
+            "role": application.role,
+            "subject": application.subject,
+            "from_email": application.from_email,
+            "snippet": application.snippet,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting application: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get application: {str(e)}")
+
+@app.get("/applications/stats")
+async def get_applications_stats(user_id: str = Query(...), db: Session = Depends(get_db)):
+    """
+    Get application statistics by category
+    Returns: { "APPLIED": count, "REJECTED": count, "INTERVIEW": count, "OFFER_ACCEPTED": count, "GHOSTED": count }
+    Strict API contract - uppercase categories only
+    """
+    try:
+        # user_id is email, get database user
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            return {
+                "APPLIED": 0,
+                "REJECTED": 0,
+                "INTERVIEW": 0,
+                "OFFER_ACCEPTED": 0,
+                "GHOSTED": 0,
+            }
+        return calculate_stats(db, user.id)
+    except Exception as e:
+        logger.error(f"Error getting application stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get application stats: {str(e)}")
+
 @app.get("/stats")
 async def get_stats(user_id: str = Query(...), db: Session = Depends(get_db)):
     """
-    Get dashboard statistics
+    Get dashboard statistics (legacy endpoint)
     Returns REAL counts from backend, never estimated
     """
     try:
@@ -373,7 +475,16 @@ async def get_stats(user_id: str = Query(...), db: Session = Depends(get_db)):
         user = db.query(User).filter(User.email == user_id).first()
         if not user:
             return {"total": 0, "applied": 0, "rejected": 0, "interview": 0, "offer": 0, "ghosted": 0}
-        return calculate_stats(db, user.id)
+        stats = calculate_stats(db, user.id)
+        # Convert to lowercase for backward compatibility
+        return {
+            "total": sum(stats.values()),
+            "applied": stats.get("APPLIED", 0),
+            "rejected": stats.get("REJECTED", 0),
+            "interview": stats.get("INTERVIEW", 0),
+            "offer": stats.get("OFFER_ACCEPTED", 0),
+            "ghosted": stats.get("GHOSTED", 0),
+        }
     except Exception as e:
         logger.error(f"Error getting stats: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
