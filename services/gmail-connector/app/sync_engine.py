@@ -136,17 +136,22 @@ class SyncEngine:
                     }
                     
                     batch_count += 1
+                    processed_count = sum(classified.values())
                     
-                    # Yield progress update every batch_size or at the end
-                    if batch_count >= batch_size or idx == len(candidate_emails) - 1:
-                        yield {
-                            "total_scanned": total_scanned,
-                            "total_fetched": total_fetched,
-                            "candidate_job_emails": candidate_job_emails,
-                            "classified": classified.copy(),
-                            "skipped": skipped,
-                            "email_entry": email_entry if batch_count >= batch_size else None,  # Include latest email entry
-                        }
+                    # Yield progress update for EVERY email (real-time updates)
+                    # This allows the UI to show each email being processed one by one
+                    yield {
+                        "total_scanned": total_scanned,
+                        "total_fetched": total_fetched,
+                        "candidate_job_emails": candidate_job_emails,
+                        "processed_emails": processed_count,
+                        "classified": classified.copy(),
+                        "skipped": skipped,
+                        "email_entry": email_entry,  # Include email entry for each processed email
+                    }
+                    
+                    # Reset batch count after yielding (we still process in batches for efficiency)
+                    if batch_count >= batch_size:
                         batch_count = 0
                         
                 except Exception as e:

@@ -123,44 +123,112 @@ class SyncJob(Base):
     current_phase = Column(String, nullable=True)  # e.g., "fetching_ids", "processing_messages", "completed"
     current_page = Column(Integer, default=0)  # Current pagination page
     
+    # Progress event persistence
+    last_event_json = Column(JSON, nullable=True)  # Last progress event for SSE reconnection
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)  # Last activity timestamp
+    error_json = Column(JSON, nullable=True)  # Error details as JSON
+    
+    # Counts for progress tracking (can also be in JSON, but separate columns for easier querying)
+    counts_listed = Column(Integer, default=0)
+    counts_fetched = Column(Integer, default=0)
+    counts_parsed = Column(Integer, default=0)
+    counts_classified = Column(Integer, default=0)
+    counts_saved = Column(Integer, default=0)
+    counts_skipped = Column(Integer, default=0)
+    counts_failed = Column(Integer, default=0)
+    
+    # Rate tracking
+    rate_emails_per_sec = Column(Integer, default=0)
+    rate_bytes_per_sec = Column(Integer, default=0)
+    
     # Relationships
     user = relationship("User")
 
 def init_db():
     """Initialize database tables with schema migration support"""
-    # Ensure all tables exist first
-    Base.metadata.create_all(bind=engine)
-    
-    # Refresh inspector after table creation
-    inspector = inspect(engine)
-    tables = inspector.get_table_names()
-    
-    # Migrate sync_jobs table if needed (add missing columns)
-    if 'sync_jobs' in tables:
-        existing_columns = {col['name'] for col in inspector.get_columns('sync_jobs')}
-        required_columns = {
-            'processed_failed', 'error_code', 'checkpoint', 
-            'finished_at', 'current_phase', 'current_page'
-        }
-        missing_columns = required_columns - existing_columns
+    try:
+        # Refresh inspector first to check existing tables
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
         
-        if missing_columns:
-            logger.info(f"Migrating sync_jobs table: adding columns {missing_columns}")
-            with engine.begin() as conn:
-                # Use ALTER TABLE to add missing columns
-                if 'processed_failed' in missing_columns:
-                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS processed_failed INTEGER DEFAULT 0"))
-                if 'error_code' in missing_columns:
-                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS error_code VARCHAR"))
-                if 'checkpoint' in missing_columns:
-                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS checkpoint JSON"))
-                if 'finished_at' in missing_columns:
-                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP WITH TIME ZONE"))
-                if 'current_phase' in missing_columns:
-                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS current_phase VARCHAR"))
-                if 'current_page' in missing_columns:
-                    conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS current_page INTEGER DEFAULT 0"))
-            logger.info("sync_jobs table migration completed")
+        # Migrate sync_jobs table FIRST (before creating tables) if it exists
+        # This must run before any queries to avoid "column does not exist" errors
+        if 'sync_jobs' in tables:
+            existing_columns = {col['name'] for col in inspector.get_columns('sync_jobs')}
+            required_columns = {
+                'processed_failed', 'error_code', 'checkpoint', 
+                'finished_at', 'current_phase', 'current_page',
+                'last_event_json', 'last_heartbeat_at', 'error_json',
+                'counts_listed', 'counts_fetched', 'counts_parsed',
+                'counts_classified', 'counts_saved', 'counts_skipped', 'counts_failed',
+                'rate_emails_per_sec', 'rate_bytes_per_sec'
+            }
+            missing_columns = required_columns - existing_columns
+            
+            if missing_columns:
+                logger.info(f"Migrating sync_jobs table: adding columns {missing_columns}")
+                with engine.begin() as conn:
+                    # Use ALTER TABLE to add missing columns
+                    if 'processed_failed' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS processed_failed INTEGER DEFAULT 0"))
+                    if 'error_code' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS error_code VARCHAR"))
+                    if 'checkpoint' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS checkpoint JSON"))
+                    if 'finished_at' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP WITH TIME ZONE"))
+                    if 'current_phase' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS current_phase VARCHAR"))
+                    if 'current_page' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS current_page INTEGER DEFAULT 0"))
+                    # New columns for progress events and SSE
+                    if 'last_event_json' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS last_event_json JSON"))
+                    if 'last_heartbeat_at' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMP WITH TIME ZONE"))
+                    if 'error_json' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS error_json JSON"))
+                    # Count columns
+                    if 'counts_listed' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS counts_listed INTEGER DEFAULT 0"))
+                    if 'counts_fetched' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS counts_fetched INTEGER DEFAULT 0"))
+                    if 'counts_parsed' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS counts_parsed INTEGER DEFAULT 0"))
+                    if 'counts_classified' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS counts_classified INTEGER DEFAULT 0"))
+                    if 'counts_saved' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS counts_saved INTEGER DEFAULT 0"))
+                    if 'counts_skipped' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS counts_skipped INTEGER DEFAULT 0"))
+                    if 'counts_failed' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS counts_failed INTEGER DEFAULT 0"))
+                    # Rate columns
+                    if 'rate_emails_per_sec' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS rate_emails_per_sec INTEGER DEFAULT 0"))
+                    if 'rate_bytes_per_sec' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS rate_bytes_per_sec INTEGER DEFAULT 0"))
+                logger.info("sync_jobs table migration completed")
+        
+        # Now create all tables (this will create new tables but won't modify existing ones)
+        # This must come AFTER migration to avoid column errors
+        Base.metadata.create_all(bind=engine)
+    
+    except Exception as e:
+        logger.error(f"Error during database initialization: {e}", exc_info=True)
+        # Try to create tables anyway
+        try:
+            Base.metadata.create_all(bind=engine)
+        except Exception as e2:
+            logger.error(f"Error creating tables: {e2}", exc_info=True)
+    
+    # Refresh inspector after migration for users check
+    try:
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+    except Exception as e:
+        logger.error(f"Error inspecting database: {e}", exc_info=True)
+        return
     
     # Check if schema migration is needed (users.id should be UUID, not integer)
     if 'users' in tables:

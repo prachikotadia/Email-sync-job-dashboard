@@ -6,7 +6,7 @@ import os
 import time
 import logging
 from datetime import datetime, timezone
-from app.routers import auth, gmail, export, resume
+from app.routers import auth, gmail, export, resume, sse
 from app.middleware.auth_middleware import verify_token
 
 # Configure logging
@@ -37,6 +37,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 # Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(gmail.router, prefix="/api/gmail", tags=["gmail"])
+app.include_router(sse.router, prefix="/api/gmail", tags=["gmail"])
 app.include_router(export.router, prefix="/api/exports", tags=["exports"])
 app.include_router(resume.router, prefix="/api/resumes", tags=["resumes"])
 

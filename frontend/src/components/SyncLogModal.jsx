@@ -1,13 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { IconRefresh, IconCheck, IconX } from './icons'
 import '../styles/SyncLogModal.css'
 
-export default function SyncLogModal({ progress, isRunning, onClose }) {
+export default function SyncLogModal({ progress, isRunning, onClose, connected = true, reconnecting = false, sseError = null }) {
   const logContainerRef = useRef(null)
   const emailsListRef = useRef(null)
-  const [showFullLogs, setShowFullLogs] = useState(false)
   const [userScrolledLogs, setUserScrolledLogs] = useState(false)
   const [userScrolledEmails, setUserScrolledEmails] = useState(false)
+
+  // Prevent body scroll when modal is open
+  useEffect(() => {
+    const originalStyle = window.getComputedStyle(document.body).overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = originalStyle
+    }
+  }, [])
 
   // Auto-scroll logs to bottom unless user scrolled up
   useEffect(() => {
@@ -48,6 +57,7 @@ export default function SyncLogModal({ progress, isRunning, onClose }) {
     }
   }
 
+  // Show modal if running or if there's progress data (even if completed)
   if (!isRunning && !progress) return null
 
   const status = progress?.status || 'running'
@@ -130,7 +140,7 @@ export default function SyncLogModal({ progress, isRunning, onClose }) {
     ? Math.min(50, Math.round((processedEmails / 100) * 50)) // Show partial progress if total unknown
     : 0
 
-  return (
+  const modalContent = (
     <div className="sync-log-modal-overlay" onClick={onClose}>
       <div className="sync-log-modal neo-card" onClick={(e) => e.stopPropagation()}>
         {/* Header with status */}
@@ -151,7 +161,13 @@ export default function SyncLogModal({ progress, isRunning, onClose }) {
               <h2 className={status === 'completed' ? 'sync-log-complete' : status === 'failed' ? 'sync-log-failed' : ''}>
                 {statusTitle}
               </h2>
-              {(status === 'completed' || status === 'running') && (
+              {reconnecting && (
+                <p className="sync-log-subtitle" style={{ color: '#f59e0b' }}>Reconnecting to sync stream...</p>
+              )}
+              {!connected && !reconnecting && sseError && (
+                <p className="sync-log-subtitle" style={{ color: '#dc2626' }}>Connection lost: {sseError}</p>
+              )}
+              {connected && !reconnecting && (status === 'completed' || status === 'running') && (
                 <p className="sync-log-subtitle">Please wait while we sync your data.</p>
               )}
               {status === 'failed' && (
@@ -164,33 +180,79 @@ export default function SyncLogModal({ progress, isRunning, onClose }) {
           </button>
         </div>
 
-        {/* Summary Box - Show during sync and on completion */}
-        {showSummaryBox && (
-          <div className={`sync-log-summary-box ${status === 'failed' ? 'sync-log-summary-error' : ''}`}>
-            {status === 'completed' ? (
-              <>✓ {totalStored.toLocaleString()} emails stored</>
-            ) : status === 'failed' ? (
-              <>✗ Sync failed. Please try again.</>
-            ) : (
-              <div className="sync-log-progress-info">
-                <div>Processing...</div>
+        {/* Status Summary Box - Always visible with progress */}
+        <div className={`sync-log-summary-box ${status === 'failed' ? 'sync-log-summary-error' : ''}`}>
+          {status === 'completed' ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span>✓</span>
+              <span>{totalStored.toLocaleString()} emails stored successfully</span>
+            </div>
+          ) : status === 'failed' ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span>✗</span>
+              <span>Sync failed. Please try again.</span>
+            </div>
+          ) : (
+            <div className="sync-log-progress-info">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{ fontWeight: 600 }}>Status: {statusTitle}</span>
                 {totalEmails > 0 && (
-                  <div className="sync-log-progress-bar-container">
-                    <div className="sync-log-progress-bar">
-                      <div 
-                        className="sync-log-progress-bar-fill" 
-                        style={{ width: `${progressPercentage}%` }}
-                      />
-                    </div>
-                    <div className="sync-log-progress-text">
-                      {processedEmails} / {totalEmails} emails ({progressPercentage}%)
-                    </div>
-                  </div>
+                  <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                    {processedEmails} / {totalEmails} emails
+                  </span>
                 )}
+              </div>
+              {totalEmails > 0 && (
+                <div className="sync-log-progress-bar-container">
+                  <div className="sync-log-progress-bar">
+                    <div 
+                      className="sync-log-progress-bar-fill" 
+                      style={{ width: `${progressPercentage}%` }}
+                    />
+                  </div>
+                  <div className="sync-log-progress-text">
+                    Progress: {progressPercentage}% complete
+                  </div>
+                </div>
+              )}
+              {totalEmails === 0 && processedEmails === 0 && (
+                <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                  Initializing sync process...
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Real-Time Logs Section - Always Visible */}
+        <div className="sync-log-detailed-logs">
+          <h4>Real-Time Sync Logs</h4>
+          <div 
+            className="sync-log-container" 
+            ref={logContainerRef}
+            onScroll={handleLogScroll}
+          >
+            {logEntries.length === 0 ? (
+              <div className="sync-log-entry sync-log-info">
+                <span className="sync-log-time">[{formatTime(new Date())}]</span>
+                <span className="sync-log-message">Initializing sync...</span>
+              </div>
+            ) : (
+              logEntries.map((entry, index) => (
+                <div key={index} className={`sync-log-entry sync-log-${entry.type || 'info'}`}>
+                  <span className="sync-log-time">[{formatTime(entry.time)}]</span>
+                  <span className="sync-log-message">{entry.message}</span>
+                </div>
+              ))
+            )}
+            {status === 'running' && (
+              <div className="sync-log-entry sync-log-info">
+                <span className="sync-log-time">[{formatTime(new Date())}]</span>
+                <span className="sync-log-message">Processing... <span className="sync-log-dots">...</span></span>
               </div>
             )}
           </div>
-        )}
+        </div>
 
         {/* Progress Section - Email List */}
         {(status === 'running' || status === 'completed') && (
@@ -214,73 +276,34 @@ export default function SyncLogModal({ progress, isRunning, onClose }) {
                     />
                     <div className="sync-log-email-content">
                       <div className="sync-log-email-text">{entry.fullText}</div>
-          </div>
-          </div>
+                    </div>
+                  </div>
                 ))
               ) : (
                 <div className="sync-log-email-entry sync-log-processing">
                   <div className="sync-log-email-dot sync-log-dot-info" />
                   <div className="sync-log-email-content">
                     <div className="sync-log-email-text">Processing emails...</div>
-          </div>
-          </div>
-              )}
-          </div>
-          </div>
-        )}
-
-        {/* Detailed Logs Section - Toggleable */}
-        {showFullLogs && (
-          <div className="sync-log-detailed-logs">
-            <h4>Detailed Sync Logs</h4>
-            <div 
-              className="sync-log-container" 
-              ref={logContainerRef}
-              onScroll={handleLogScroll}
-            >
-            {logEntries.length === 0 ? (
-                <div className="sync-log-entry sync-log-info">
-                <span className="sync-log-time">[{formatTime(new Date())}]</span>
-                <span className="sync-log-message">Initializing sync...</span>
-              </div>
-            ) : (
-              logEntries.map((entry, index) => (
-                  <div key={index} className={`sync-log-entry sync-log-${entry.type || 'info'}`}>
-                  <span className="sync-log-time">[{formatTime(entry.time)}]</span>
-                  <span className="sync-log-message">{entry.message}</span>
+                  </div>
                 </div>
-              ))
-            )}
-              {status === 'running' && logEntries.length > 0 && (
-              <div className="sync-log-entry sync-log-info">
-                <span className="sync-log-time">[{formatTime(new Date())}]</span>
-                <span className="sync-log-message">Processing... <span className="sync-log-dots">...</span></span>
-              </div>
-            )}
+              )}
+            </div>
           </div>
-        </div>
         )}
 
         {/* Actions */}
         <div className="sync-log-modal-actions">
-          {logEntries.length > 0 && (
-            <button 
-              type="button" 
-              className="sync-log-modal-btn sync-log-modal-btn-logs" 
-              onClick={() => setShowFullLogs(!showFullLogs)}
-            >
-              &gt; {showFullLogs ? 'Hide' : 'View'} Full Logs
-            </button>
-          )}
           <button 
             type="button" 
             className={`sync-log-modal-btn ${status === 'completed' || status === 'failed' ? 'sync-log-modal-btn-close' : 'sync-log-modal-btn-secondary'}`} 
             onClick={onClose}
           >
-            Close
+            {status === 'running' ? 'Minimize' : 'Close'}
           </button>
         </div>
       </div>
     </div>
   )
+
+  return createPortal(modalContent, document.body)
 }

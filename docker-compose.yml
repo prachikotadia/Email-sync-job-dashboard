@@ -64,6 +64,7 @@ services:
       - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
       - RESUME_SERVICE_URL=http://resume-service:8004
       - FRONTEND_URL=http://localhost:3000
+      - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - JWT_ALGORITHM=HS256
     depends_on:
@@ -128,10 +129,13 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - REDIRECT_URI=${REDIRECT_URI:-http://localhost:8000/api/auth/callback}
       - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
+      - REDIS_URL=redis://redis:6379/0
       - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
       - GHOSTED_DAYS=${GHOSTED_DAYS:-21}
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       classifier-service:
         condition: service_started
@@ -189,6 +193,53 @@ services:
       - job-tracker-network
 
   # --------------------------------------------------------------------------
+  # Redis: Job queue and pub/sub for progress events
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: jobpulse-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - job-tracker-network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
+  # --------------------------------------------------------------------------
+  # Gmail Sync Worker: Background job processor
+  # --------------------------------------------------------------------------
+  gmail-sync-worker:
+    build:
+      context: ./services/gmail-connector
+      dockerfile: Dockerfile
+    container_name: jobpulse-gmail-sync-worker
+    command: python -m app.worker
+    environment:
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - REDIRECT_URI=${REDIRECT_URI:-http://localhost:8000/api/auth/callback}
+      - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
+      - REDIS_URL=redis://redis:6379/0
+      - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
+      - GHOSTED_DAYS=${GHOSTED_DAYS:-21}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      classifier-service:
+        condition: service_started
+    networks:
+      - job-tracker-network
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
   # Database: PostgreSQL for persistent storage
   # --------------------------------------------------------------------------
   db:
@@ -217,6 +268,8 @@ services:
 # --------------------------------------------------------------------------
 volumes:
   postgres-data:
+    driver: local
+  redis-data:
     driver: local
 
 # --------------------------------------------------------------------------

@@ -4,8 +4,8 @@ import { useAuth } from '../context/AuthContext'
 import { useProfileImage } from '../context/ProfileImageContext'
 import { useProfileLinks } from '../context/ProfileLinksContext'
 import { gmailService } from '../services/gmailService'
-import SyncCompleteModal from '../components/SyncCompleteModal'
 import SyncLogModal from '../components/SyncLogModal'
+import { useGmailSyncProgress } from '../hooks/useGmailSyncProgress'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, LabelList, Cell } from 'recharts'
 import { 
   IconRocket, 
@@ -46,22 +46,79 @@ function Dashboard() {
   const [stats, setStats] = useState(() => (isGuest ? MOCK_DASHBOARD_STATS : null))
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(() => !isGuest)
-  const [showSyncCompleteModal, setShowSyncCompleteModal] = useState(false)
   const [showSyncLogModal, setShowSyncLogModal] = useState(false)
+  const [currentSyncId, setCurrentSyncId] = useState(null)
   
-  const pollIntervalRef = useRef(null)
   const syncCheckRef = useRef(false)
+  
+  // Use SSE hook for progress updates (NO POLLING)
+  const { event: progressEvent, connected, reconnecting, error: sseError } = useGmailSyncProgress(currentSyncId)
 
   // Load initial data – guest uses mock only (no API). Google users call backend.
   useEffect(() => {
     if (isGuest) return
     loadInitialData()
-    return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current)
-      }
-    }
   }, [isGuest])
+  
+  // Update sync state from SSE events - accumulate progress
+  useEffect(() => {
+    if (!progressEvent) return
+    
+    const phase = progressEvent.phase
+    const isRunning = !progressEvent.done && phase !== 'failed' && phase !== 'canceled'
+    
+    // Accumulate logs and update progress
+    setSyncState(prevState => {
+      const existingLogs = prevState.progress?.logs || []
+      const newLog = {
+        time: progressEvent.ts,
+        message: progressEvent.message,
+        type: progressEvent.level || 'info'
+      }
+      
+      // Only add if it's a new log (different timestamp or message)
+      const isNewLog = !existingLogs.some(log => 
+        log.time === newLog.time && log.message === newLog.message
+      )
+      const updatedLogs = isNewLog ? [...existingLogs, newLog] : existingLogs
+      
+      // Get counts from event - use the latest values
+      const counts = progressEvent.counts || {}
+      
+      return {
+        isRunning,
+        jobId: progressEvent.sync_id,
+        progress: {
+          status: phase === 'done' ? 'completed' : phase === 'failed' ? 'failed' : 'running',
+          state: phase.toUpperCase(),
+          total_emails: counts.total_estimated || counts.listed || 0,
+          total_scanned: counts.listed || counts.total_estimated || 0,
+          processed_emails: counts.fetched || counts.parsed || 0,
+          emails_fetched: counts.fetched || 0,
+          total_fetched: counts.fetched || 0,
+          applications_found: counts.saved || counts.classified || 0,
+          skipped: counts.skipped || 0,
+          failed: counts.failed || 0,
+          counts: {
+            applied: 0,
+            rejected: 0,
+            interview: 0,
+            offer: 0,
+            ghosted: 0
+          },
+          logs: updatedLogs.slice(-200), // Keep last 200 logs
+          email_entries: prevState.progress?.email_entries || [],
+          // Store raw event for debugging
+          lastEvent: progressEvent
+        }
+      }
+    })
+    
+    // If done, reload data
+    if (progressEvent.done && phase === 'done') {
+      setTimeout(() => loadInitialData(), 1000) // Small delay to ensure DB is updated
+    }
+  }, [progressEvent])
 
   const loadInitialData = async () => {
     try {
@@ -76,9 +133,15 @@ function Dashboard() {
       setStats(statsData)
       setApplications(appsData.applications || [])
       
-      // Check if sync is running
+      // Check if sync is running - connect to SSE
       if (statusData.syncJobId) {
-        startProgressPolling(statusData.syncJobId)
+        setCurrentSyncId(statusData.syncJobId)
+        setSyncState({
+          isRunning: true,
+          jobId: statusData.syncJobId,
+          progress: null
+        })
+        setShowSyncLogModal(true)
       }
     } catch (err) {
       setError(err.message || 'Failed to load dashboard data')
@@ -87,138 +150,7 @@ function Dashboard() {
     }
   }
 
-  const startProgressPolling = useCallback((jobId) => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current)
-    }
-
-    setSyncState({
-      isRunning: true,
-      jobId,
-      progress: null,
-    })
-
-    let consecutiveFailures = 0
-    let currentBackoff = 2000 // Start with 2s
-    let inFlightRequest = false // Prevent overlapping requests
-
-    const pollStatus = async () => {
-      // Prevent overlapping requests
-      if (inFlightRequest) {
-        return
-      }
-
-      inFlightRequest = true
-      try {
-        const status = await gmailService.getSyncStatus(jobId)
-        
-        // Reset backoff on success
-        consecutiveFailures = 0
-        currentBackoff = 2000
-
-        setSyncState(prev => ({
-          ...prev,
-          progress: status,
-        }))
-
-        // Handle unavailable state (200 response with state:"unavailable" or status:"unavailable")
-        if (status.status === 'unavailable' || status.state === 'UNAVAILABLE') {
-          consecutiveFailures++
-          const retryAfter = status.retryAfterSeconds || currentBackoff / 1000
-          console.warn(`Gmail service unavailable. Retrying in ${retryAfter}s...`)
-          
-          // Update interval to retry after specified delay
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current)
-          }
-          pollIntervalRef.current = setTimeout(pollStatus, retryAfter * 1000)
-          
-          // Stop after 10 consecutive failures
-          if (consecutiveFailures >= 10) {
-            if (pollIntervalRef.current) {
-              clearTimeout(pollIntervalRef.current)
-              pollIntervalRef.current = null
-            }
-            setError(`Gmail service temporarily unavailable. Please refresh the page to retry.`)
-            setSyncState(prev => ({ ...prev, isRunning: false }))
-            return
-          }
-          return
-        }
-
-        // Handle NOT_FOUND state (stop polling, show error)
-        if (status.status === 'not_found' || status.state === 'NOT_FOUND') {
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current)
-            pollIntervalRef.current = null
-          }
-          setError(status.errors?.[0] || 'Sync job not found. Please start a new sync.')
-          setSyncState(prev => ({ ...prev, isRunning: false }))
-          return
-        }
-
-        // Update stats from status.counts (backend is source of truth)
-        if (status.counts) {
-          // Convert to stats format
-          setStats({
-            total: status.applications_found || 0,
-            applied: status.counts.applied || 0,
-            rejected: status.counts.rejected || 0,
-            interview: status.counts.interview || 0,
-            offer: status.counts.offer || 0,
-            ghosted: status.counts.ghosted || 0,
-          })
-        }
-
-        // Stop polling if sync is complete (check both status and state fields)
-        if (status.status === 'completed' || status.status === 'failed' || 
-            status.state === 'COMPLETED' || status.state === 'DONE' || status.state === 'FAILED') {
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current)
-            pollIntervalRef.current = null
-          }
-          setSyncState(prev => ({ ...prev, isRunning: false }))
-          if (status.status === 'completed') {
-            // Reload all data immediately after sync completes to show recent mails
-            await loadInitialData()
-            // Keep log modal open to show completion
-          } else if (status.status === 'failed') {
-            setError(status.errors?.[0] || 'Sync failed')
-            // Keep log modal open to show errors
-          }
-        }
-      } catch (err) {
-        consecutiveFailures++
-        console.error('Sync status polling error:', err)
-        
-        // Exponential backoff: 2s, 4s, 8s, 16s, max 30s
-        currentBackoff = Math.min(currentBackoff * 2, 30000)
-        
-        // Stop after 10 consecutive failures
-        if (consecutiveFailures >= 10) {
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current)
-            pollIntervalRef.current = null
-          }
-          setError('Sync status polling failed. Please refresh the page to retry.')
-          setSyncState(prev => ({ ...prev, isRunning: false }))
-          return
-        }
-        
-        // Schedule next poll with backoff
-        if (pollIntervalRef.current) {
-          clearInterval(pollIntervalRef.current)
-        }
-        pollIntervalRef.current = setTimeout(pollStatus, currentBackoff)
-      } finally {
-        inFlightRequest = false
-      }
-    }
-
-    // Start polling immediately, then every 2 seconds while running
-    pollStatus()
-    pollIntervalRef.current = setInterval(pollStatus, 2000) // Poll every 2s
-  }, [loadInitialData])
+  // NO POLLING - SSE hook handles all progress updates
 
   const handleStartSync = async () => {
     if (syncCheckRef.current || syncState.isRunning) {
@@ -241,10 +173,15 @@ function Dashboard() {
       })
       
       const result = await gmailService.startSync()
-      // Contract: { "sync_id": "uuid", "status": "started" }
+      // Contract: { "sync_id": "uuid", "status": "queued" }
       const syncId = result.sync_id || result.jobId
       if (syncId) {
-        startProgressPolling(syncId)
+        setCurrentSyncId(syncId)
+        setSyncState({
+          isRunning: true,
+          jobId: syncId,
+          progress: null
+        })
       } else {
         throw new Error('No sync_id returned from server')
       }
@@ -254,9 +191,14 @@ function Dashboard() {
       if (err.message.includes('already running')) {
         // Try to get the existing sync ID
         try {
-        const status = await gmailService.getStatus()
-        if (status.syncJobId) {
-          startProgressPolling(status.syncJobId)
+          const status = await gmailService.getStatus()
+          if (status.syncJobId) {
+            setCurrentSyncId(status.syncJobId)
+            setSyncState({
+              isRunning: true,
+              jobId: status.syncJobId,
+              progress: null
+            })
             setShowSyncLogModal(true)
           }
         } catch (statusErr) {
@@ -300,8 +242,14 @@ function Dashboard() {
             </button>
           </div>
         </div>
-        {showSyncCompleteModal && (
-          <SyncCompleteModal progress={syncState.progress} onClose={() => setShowSyncCompleteModal(false)} />
+        {showSyncLogModal && (
+          <SyncLogModal
+            progress={syncState.progress}
+            isRunning={syncState.isRunning}
+            onClose={() => {
+              setShowSyncLogModal(false)
+            }}
+          />
         )}
       </>
     )
@@ -688,23 +636,16 @@ function Dashboard() {
         </div>
       </div>
 
-      {showSyncCompleteModal && (
-        <SyncCompleteModal
-          progress={syncState.progress}
-          onClose={() => setShowSyncCompleteModal(false)}
-        />
-      )}
-      
       {showSyncLogModal && (
         <SyncLogModal
           progress={syncState.progress}
           isRunning={syncState.isRunning}
+          connected={connected}
+          reconnecting={reconnecting}
+          sseError={sseError}
           onClose={() => {
             setShowSyncLogModal(false)
-            // Only show completion modal if sync completed and log modal is closing
-            if (syncState.progress?.status === 'completed') {
-              setShowSyncCompleteModal(true)
-            }
+            // Don't clear syncId - allow reconnection if user reopens
           }}
         />
       )}

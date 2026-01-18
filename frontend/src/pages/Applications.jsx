@@ -102,16 +102,12 @@ export default function Applications() {
       }
     }
 
-    // Poll every 3 seconds when on Applications page
-    syncCheckInterval = setInterval(checkSyncStatus, 3000)
-    
-    // Initial check
+    // NO POLLING - SSE handles progress updates
+    // Only check once on mount if needed
     checkSyncStatus()
 
     return () => {
-      if (syncCheckInterval) {
-        clearInterval(syncCheckInterval)
-      }
+      // Cleanup handled by SSE hook
     }
   }, [isGuest, loadApplications])
 

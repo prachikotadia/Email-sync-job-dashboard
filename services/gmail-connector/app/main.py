@@ -194,17 +194,40 @@ async def start_sync(
     
     db.commit()
     
-    # Start sync in background using asyncio.create_task (fire-and-forget)
-    task = asyncio.create_task(run_sync(job_id, user.id, user_email))
+    # Enqueue sync job to RQ worker queue
+    enqueued = False  # Default to False (will use async task fallback)
+    try:
+        from app.queue import enqueue_sync_job
+        enqueued = enqueue_sync_job(str(job_id), str(user.id), user_email)
+        
+        if not enqueued:
+            # Failed to enqueue - fallback to async task (backward compatibility)
+            logger.warning(f"Failed to enqueue job {job_id}, falling back to async task")
+            # Use run_sync_with_progress to ensure events are published
+            from app.worker import run_sync_with_progress
+            task = asyncio.create_task(run_sync_with_progress(job_id, user.id, user_email))
+            logger.info(f"Sync job {job_id} started as async task (fallback mode)")
+        else:
+            logger.info(f"Sync job {job_id} enqueued successfully")
+    except Exception as e:
+        # If queue system fails, fallback to async task
+        logger.error(f"Queue system error, falling back to async task: {e}", exc_info=True)
+        # Use run_sync_with_progress to ensure events are published
+        from app.worker import run_sync_with_progress
+        task = asyncio.create_task(run_sync_with_progress(job_id, user.id, user_email))
+        logger.info(f"Sync job {job_id} started as async task (fallback mode)")
     
     # Log response time to verify endpoint returns quickly
     response_time_ms = (time.time() - start_time) * 1000
-    logger.info(f"Sync job {job_id} created in {response_time_ms:.1f}ms - background task scheduled")
     
-    # Return 202 Accepted immediately - sync runs in background
+    # Determine status based on whether job was enqueued or started as async task
+    job_status = "queued" if enqueued else "pending"
+    logger.info(f"Sync job {job_id} created in {response_time_ms:.1f}ms (status: {job_status})")
+    
+    # Return 202 Accepted immediately - sync runs in worker or async task
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={"sync_id": str(job_id), "status": "pending"}
+        content={"sync_id": str(job_id), "status": job_status}
     )
 
 def add_log(db: Session, job_id: uuid.UUID, message: str, log_type: str = "info"):
@@ -268,11 +291,17 @@ async def run_sync(job_id: uuid.UUID, user_id: int, user_email: str):
             raise Exception(f"REAUTH_REQUIRED: {error_msg}")
         
         # Check if token is expired and refresh if needed
-        if oauth_token.expires_at and oauth_token.expires_at < datetime.now(timezone.utc):
-            if not oauth_token.refresh_token:
-                error_msg = "Access token expired and no refresh token available. Please re-authenticate."
-                add_log(db, job_id, f"ERROR: {error_msg}", "error")
-                raise Exception(f"REAUTH_REQUIRED: {error_msg}")
+        if oauth_token.expires_at:
+            # Ensure expires_at is timezone-aware (handle both naive and aware datetimes)
+            expires_at = oauth_token.expires_at
+            if expires_at.tzinfo is None:
+                # If naive, assume UTC
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at < datetime.now(timezone.utc):
+                if not oauth_token.refresh_token:
+                    error_msg = "Access token expired and no refresh token available. Please re-authenticate."
+                    add_log(db, job_id, f"ERROR: {error_msg}", "error")
+                    raise Exception(f"REAUTH_REQUIRED: {error_msg}")
         
         add_log(db, job_id, "Initializing Gmail client...", "info")
         # Initialize Gmail client with OAuth tokens
@@ -960,6 +989,9 @@ async def store_oauth_tokens(request: OAuthTokenStoreRequest, db: Session = Depe
         if request.expires_at:
             try:
                 expires_at = datetime.fromisoformat(request.expires_at.replace('Z', '+00:00'))
+                # Ensure timezone-aware (if naive, assume UTC)
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
             except:
                 expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         
