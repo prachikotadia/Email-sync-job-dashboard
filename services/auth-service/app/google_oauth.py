@@ -10,10 +10,11 @@ class GoogleOAuth:
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
         
-        # Section 2 / Step 4: Auth only. No Gmail scopes here; add in Step 5 when needed.
+        # OAuth scopes: User info + Gmail read access
         self.scopes = [
             "https://www.googleapis.com/auth/userinfo.email",
             "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/gmail.readonly",  # Gmail read access
         ]
         
         self.client_config = {
@@ -42,7 +43,6 @@ class GoogleOAuth:
         
         authorization_url, _ = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes=True,
             prompt="consent"
         )
         
@@ -52,24 +52,54 @@ class GoogleOAuth:
         """
         Exchange authorization code for access token
         """
-        flow = Flow.from_client_config(
-            self.client_config,
-            scopes=self.scopes,
-            redirect_uri=self.redirect_uri
-        )
+        import logging
+        logger = logging.getLogger(__name__)
         
-        flow.fetch_token(code=code)
-        
-        credentials = flow.credentials
-        
-        return {
-            "access_token": credentials.token,
-            "refresh_token": credentials.refresh_token,
-            "token_uri": credentials.token_uri,
-            "client_id": credentials.client_id,
-            "client_secret": credentials.client_secret,
-            "scopes": credentials.scopes,
-        }
+        try:
+            logger.info(f"Exchanging OAuth code with redirect_uri: {self.redirect_uri}")
+            logger.info(f"Client ID: {self.client_id[:20]}...")
+            logger.info(f"Code length: {len(code)}")
+            
+            flow = Flow.from_client_config(
+                self.client_config,
+                scopes=self.scopes,
+                redirect_uri=self.redirect_uri
+            )
+            
+            # Try to fetch token and capture detailed error
+            try:
+                flow.fetch_token(code=code)
+            except Exception as fetch_error:
+                error_detail = str(fetch_error)
+                logger.error(f"fetch_token failed: {error_detail}")
+                logger.error(f"Error type: {type(fetch_error).__name__}")
+                # Try to get more details from the error
+                if hasattr(fetch_error, 'error'):
+                    logger.error(f"Error details: {fetch_error.error}")
+                if hasattr(fetch_error, 'error_description'):
+                    logger.error(f"Error description: {fetch_error.error_description}")
+                raise
+            
+            credentials = flow.credentials
+            
+            if not credentials or not credentials.token:
+                raise Exception("Failed to obtain access token from Google")
+            
+            logger.info("Successfully obtained access token")
+            return {
+                "access_token": credentials.token,
+                "refresh_token": credentials.refresh_token,
+                "token_uri": credentials.token_uri,
+                "client_id": credentials.client_id,
+                "client_secret": credentials.client_secret,
+                "scopes": credentials.scopes,
+            }
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"OAuth token exchange failed: {error_msg}")
+            logger.error(f"Redirect URI used: {self.redirect_uri}")
+            logger.error(f"Full error: {repr(e)}")
+            raise Exception(f"OAuth token exchange failed: {error_msg}")
 
     async def get_user_info(self, access_token: str):
         """

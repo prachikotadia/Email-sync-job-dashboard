@@ -2,6 +2,7 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from typing import List, Dict, Optional
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -11,25 +12,50 @@ class GmailClient:
     Fetches ALL emails with no pagination limits
     """
     
-    def __init__(self, user_id: int, user_email: str):
+    def __init__(self, user_id: int, user_email: str, oauth_token):
+        """
+        Initialize Gmail client with OAuth tokens
+        
+        Args:
+            user_id: Database user ID
+            user_email: User's email address
+            oauth_token: OAuthToken database model instance
+        """
         self.user_id = user_id
         self.user_email = user_email
+        self.oauth_token = oauth_token
         self.service = None
         self._initialize_service()
     
     def _initialize_service(self):
         """
-        Initialize Gmail API service
-        In production, fetch credentials from secure storage/auth service
+        Initialize Gmail API service using stored OAuth tokens
         """
-        # Placeholder - actual implementation would:
-        # 1. Fetch OAuth tokens from auth service or secure storage
-        # 2. Build credentials object
-        # 3. Create service
-        
-        # For now, this is a skeleton
-        # TODO: Implement actual credential fetching
-        pass
+        try:
+            # Parse scopes from JSON string
+            scopes = []
+            if self.oauth_token.scopes:
+                try:
+                    scopes = json.loads(self.oauth_token.scopes)
+                except:
+                    scopes = [self.oauth_token.scopes] if isinstance(self.oauth_token.scopes, str) else []
+            
+            # Build credentials from stored tokens
+            credentials = Credentials(
+                token=self.oauth_token.access_token,
+                refresh_token=self.oauth_token.refresh_token,
+                token_uri=self.oauth_token.token_uri or "https://oauth2.googleapis.com/token",
+                client_id=self.oauth_token.client_id,
+                client_secret=self.oauth_token.client_secret,
+                scopes=scopes,
+            )
+            
+            # Build Gmail service
+            self.service = build('gmail', 'v1', credentials=credentials)
+            logger.info(f"Gmail service initialized for user {self.user_email}")
+        except Exception as e:
+            logger.error(f"Failed to initialize Gmail service: {e}")
+            raise Exception(f"Failed to initialize Gmail service: {str(e)}")
     
     async def get_user_email(self) -> str:
         """

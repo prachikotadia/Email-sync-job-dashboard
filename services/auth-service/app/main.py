@@ -7,9 +7,19 @@ from app.google_oauth import GoogleOAuth
 from app.jwt import create_access_token, verify_token
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 import time
+import httpx
+import json
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 _health_start = time.time()
 
@@ -63,11 +73,62 @@ async def login():
 async def callback(request: CallbackRequest):
     """
     Exchange code with Google (validates Google token). Get user info. Issue backend JWT.
+    Store OAuth tokens in gmail-connector service for Gmail access.
     Returns { token, user }. Frontend must store ONLY this token; never Google tokens.
     """
     try:
-        tokens = await oauth.exchange_code(request.code)
+        if not request.code:
+            logger.error("Missing authorization code in request")
+            raise HTTPException(status_code=400, detail="Missing authorization code")
+        
+        logger.info(f"Processing OAuth callback with code (length: {len(request.code)})")
+        logger.info(f"Redirect URI configured: {os.getenv('REDIRECT_URI')}")
+        logger.info(f"Code starts with: {request.code[:20]}...")
+        
+        try:
+            tokens = await oauth.exchange_code(request.code)
+            logger.info("Successfully exchanged code for tokens")
+        except Exception as e:
+            error_detail = str(e)
+            logger.error(f"OAuth exchange failed: {error_detail}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception args: {e.args if hasattr(e, 'args') else 'N/A'}")
+            # Print full traceback
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise HTTPException(status_code=400, detail=f"Failed to exchange authorization code: {error_detail}")
+        
+        if not tokens or "access_token" not in tokens:
+            raise HTTPException(status_code=400, detail="Failed to obtain access token from Google")
+        
         user_info = await oauth.get_user_info(tokens["access_token"])
+        
+        # Calculate token expiration (default 1 hour, but check actual expiry if available)
+        expires_at = datetime.utcnow() + timedelta(hours=1)
+        if "expires_in" in tokens:
+            expires_at = datetime.utcnow() + timedelta(seconds=tokens["expires_in"])
+        
+        # Store OAuth tokens in gmail-connector service
+        gmail_service_url = os.getenv("GMAIL_SERVICE_URL", "http://gmail-connector-service:8002")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{gmail_service_url}/oauth/store",
+                    json={
+                        "user_email": user_info["email"],
+                        "access_token": tokens["access_token"],
+                        "refresh_token": tokens.get("refresh_token"),
+                        "token_uri": tokens.get("token_uri"),
+                        "client_id": tokens.get("client_id"),
+                        "client_secret": tokens.get("client_secret"),
+                        "scopes": tokens.get("scopes", []),
+                        "expires_at": expires_at.isoformat(),
+                    }
+                )
+        except Exception as e:
+            # Log but don't fail - tokens can be stored later
+            print(f"Warning: Failed to store OAuth tokens in gmail service: {e}")
+        
         token_data = {
             "sub": user_info["email"],
             "email": user_info["email"],

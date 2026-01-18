@@ -26,6 +26,7 @@ function Router() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/auth/callback" element={<Login />} />
       <Route
         path="/"
         element={
