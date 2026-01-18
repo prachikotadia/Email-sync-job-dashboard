@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from app.database import Application, User
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,32 +30,39 @@ class GhostedDetector:
         
         logger.info("Ghosted detection check complete")
     
-    def _check_user(self, user_id: int, db: Session):
+    def _check_user(self, user_id, db: Session):
         """
         Check and update ghosted applications for a user
+        Definition: Applied exists, no reply after N days (default 21),
+        no rejection/interview/offer after that
         """
-        # Get all "applied" applications
+        # Get all "APPLIED" applications (uppercase per schema)
         applied_apps = db.query(Application).filter(
             Application.user_id == user_id,
-            Application.category == "applied"
+            Application.category == "APPLIED"  # Uppercase per schema
         ).all()
         
-        cutoff_date = datetime.utcnow() - timedelta(days=self.days)
+        cutoff_date = datetime.utcnow(timezone.utc) - timedelta(days=self.days)
         
+        ghosted_count = 0
         for app in applied_apps:
             # Check if application is old enough
-            if app.received_at and app.received_at < cutoff_date:
-                # Check if there's been any update (rejection, interview, offer)
+            if app.received_at and app.received_at.replace(tzinfo=timezone.utc) < cutoff_date:
+                # Check if there's been any update in the same thread/company
+                # Look for rejection, interview, or offer for same company
                 has_response = db.query(Application).filter(
                     Application.user_id == user_id,
                     Application.company_name == app.company_name,
-                    Application.category.in_(["rejected", "interview", "offer", "accepted"])
+                    Application.category.in_(["REJECTED", "INTERVIEW", "OFFER_ACCEPTED"])  # Uppercase
                 ).first()
                 
                 if not has_response:
                     # Mark as ghosted
-                    app.category = "ghosted"
-                    app.last_updated = datetime.utcnow()
-                    logger.info(f"Marked application {app.id} as ghosted (no response after {self.days} days)")
+                    app.category = "GHOSTED"  # Uppercase per schema
+                    app.last_updated = datetime.now(timezone.utc)
+                    ghosted_count += 1
+                    logger.info(f"Marked application {app.id} as GHOSTED (no response after {self.days} days)")
         
-        db.commit()
+        if ghosted_count > 0:
+            db.commit()
+            logger.info(f"Updated {ghosted_count} applications to GHOSTED for user {user_id}")

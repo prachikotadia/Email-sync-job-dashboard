@@ -59,7 +59,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - AUTH_SERVICE_URL=http://auth-service:8001
+      - AUTH_SERVICE_URL=http://host.docker.internal:8001
       - GMAIL_SERVICE_URL=http://gmail-connector-service:8002
       - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
       - RESUME_SERVICE_URL=http://resume-service:8004

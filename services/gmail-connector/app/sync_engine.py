@@ -4,7 +4,7 @@ from app.gmail_client import GmailClient
 from app.classifier import Classifier
 from app.company_extractor import CompanyExtractor
 from app.database import Application, User
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -53,21 +53,29 @@ class SyncEngine:
         skipped = 0
         
         # Query for job-related emails (Stage 1 - High Recall)
+        # Use broad query to catch ALL potential job emails
         query = "subject:(application OR applied OR interview OR offer OR rejection OR thank you OR hiring OR position)"
         
         try:
-            # Get total count first (estimate)
+            # Get total count first (estimate from Gmail API)
             total_count = self.gmail_client.get_message_count(query)
             total_scanned = total_count
             
             logger.info(f"Starting sync for user {user_id}: Estimated {total_count} emails to scan")
             
             # Fetch ALL messages (incremental if historyId exists)
+            # This MUST paginate until nextPageToken is null - NO early exit
             messages, latest_history_id = self.gmail_client.get_all_messages(query, existing_history_id)
             self.latest_history_id = latest_history_id
             total_fetched = len(messages)
             
-            logger.info(f"Fetched {total_fetched} messages from Gmail API")
+            # Logging MUST match requirements: "Total Gmail emails: X, Fetched: X"
+            logger.info(f"Total Gmail emails: {total_scanned}")
+            logger.info(f"Fetched messages: {total_fetched}")
+            
+            # Verify: If X ≠ X → BUG (but allow for API estimate vs actual)
+            if total_fetched < total_scanned * 0.9:  # Allow 10% variance for API estimates
+                logger.warning(f"Fetched count ({total_fetched}) significantly less than estimated ({total_scanned}). May indicate pagination issue.")
             
             # Stage 1: High Recall - Filter candidate job emails
             candidate_emails = []

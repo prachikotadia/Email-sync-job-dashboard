@@ -168,8 +168,8 @@ async def delete_resume(
 
 @router.post("/resumes/upload")
 async def upload_resume(
-    file: UploadFile = File(...),
     request: Request,
+    file: UploadFile = File(...),
     token_data: dict = Depends(verify_token)
 ):
     """Upload and parse a resume file"""

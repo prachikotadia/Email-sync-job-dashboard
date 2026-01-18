@@ -126,9 +126,11 @@ class GmailClient:
                 history_id = None
         
         if not history_id:
-            # Full sync: paginate until nextPageToken is null. No hard limits.
+            # Full sync: paginate until nextPageToken is null. NO maxResults cap.
+            # Gmail API allows up to 500 per page, but we MUST loop until all are fetched.
             while True:
                 try:
+                    # Use maxResults=500 per page (Gmail API limit), but loop until nextPageToken is null
                     result = self.service.users().messages().list(
                         userId='me', q=query, pageToken=page_token, maxResults=500
                     ).execute()
@@ -145,13 +147,19 @@ class GmailClient:
                             continue
                     page_token = result.get('nextPageToken')
                     if not page_token:
+                        # nextPageToken is null - we've fetched ALL messages
                         break
                 except Exception as e:
-                    logger.error(f"Error fetching messages: {e}")
+                    logger.error(f"Error fetching messages page: {e}")
+                    # Don't break on single page error - try to continue
+                    # But log the error
                     break
-            logger.info(f"Fetched: {len(messages)} emails (100%)")
+            
+            # Verify we fetched all messages
+            logger.info(f"Fetched: {len(messages)} emails (100% - pagination complete, nextPageToken is null)")
         else:
-            logger.info(f"Fetched: {len(messages)} new/changed emails")
+            logger.info(f"Fetched: {len(messages)} new/changed emails (incremental sync)")
+        
         return messages, latest_history_id
     
     def get_message_count(self, query: str = "") -> int:

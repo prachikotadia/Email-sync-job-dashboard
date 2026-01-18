@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum, inspect
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 import os
 import uuid
 import enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://jobpulse:jobpulse_password@db:5432/jobpulse_db")
 
@@ -37,15 +40,15 @@ class User(Base):
 class OAuthToken(Base):
     __tablename__ = "oauth_tokens"
     
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     access_token = Column(Text, nullable=False)  # Encrypted in production
     refresh_token = Column(Text)  # Encrypted in production
     token_uri = Column(String)
     client_id = Column(String)
     client_secret = Column(String)
     scopes = Column(Text)  # JSON array of scopes
-    expires_at = Column(DateTime)  # When access_token expires
+    expires_at = Column(DateTime(timezone=True))  # When access_token expires (timezone-aware)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -90,7 +93,34 @@ class SyncState(Base):
 
 def init_db():
     """Initialize database tables"""
-    Base.metadata.create_all(bind=engine)
+    # Check if schema migration is needed (users.id should be UUID, not integer)
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    
+    if 'users' in tables:
+        # Check if users.id is integer (wrong) or UUID (correct)
+        columns = inspector.get_columns('users')
+        users_id_col = next((col for col in columns if col['name'] == 'id'), None)
+        
+        if users_id_col:
+            col_type = str(users_id_col['type']).upper()
+            # Check if it's integer (wrong schema) - PostgreSQL integer types include INTEGER, INT, SERIAL, etc.
+            if 'INT' in col_type and 'UUID' not in col_type:
+                # Schema mismatch detected - drop and recreate (development only)
+                # WARNING: This will delete all data!
+                logger.warning("Schema mismatch detected: users.id is INTEGER but should be UUID. Dropping and recreating tables (development only).")
+                Base.metadata.drop_all(bind=engine)
+                Base.metadata.create_all(bind=engine)
+                logger.info("Database schema migrated successfully")
+            else:
+                # Schema is correct, just ensure all tables exist
+                Base.metadata.create_all(bind=engine)
+        else:
+            # Column doesn't exist, create tables
+            Base.metadata.create_all(bind=engine)
+    else:
+        # Tables don't exist, create them
+        Base.metadata.create_all(bind=engine)
 
 def get_db():
     """Get database session"""
