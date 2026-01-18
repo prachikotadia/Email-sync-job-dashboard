@@ -61,7 +61,6 @@ class SyncStartRequest(BaseModel):
 class ClearRequest(BaseModel):
     user_id: str
 
-<<<<<<< HEAD
 class OAuthTokenStoreRequest(BaseModel):
     user_email: str
     access_token: str
@@ -71,13 +70,12 @@ class OAuthTokenStoreRequest(BaseModel):
     client_secret: Optional[str] = None
     scopes: Optional[list] = None
     expires_at: Optional[str] = None
-=======
+
 class ExportRequest(BaseModel):
     format: str  # csv, xlsx, json, pdf
     category: str  # ALL, APPLIED, REJECTED, INTERVIEW, OFFER, GHOSTED
     dateRange: dict  # { "from": "YYYY-MM-DD" | null, "to": "YYYY-MM-DD" | null }
     fields: List[str]  # List of field names to include
->>>>>>> 374683f21e722a664dcbf5bdb1c3f2b13a84a73c
 
 @app.get("/status")
 async def get_status(user_id: str = Query(...), db: Session = Depends(get_db)):
