@@ -5,6 +5,7 @@ import { useProfileImage } from '../context/ProfileImageContext'
 import { useProfileLinks } from '../context/ProfileLinksContext'
 import { gmailService } from '../services/gmailService'
 import SyncLogModal from '../components/SyncLogModal'
+import SyncOptionsModal from '../components/SyncOptionsModal'
 import { useGmailSyncProgress } from '../hooks/useGmailSyncProgress'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, LabelList, Cell } from 'recharts'
 import { 
@@ -34,7 +35,7 @@ import '../styles/Dashboard.css'
 function Dashboard() {
   const { user, isGuest } = useAuth()
   const { profileImage } = useProfileImage()
-  const { links } = useProfileLinks()
+  const { links, linksObject } = useProfileLinks()
   const [gmailStatus, setGmailStatus] = useState(null)
   const [syncState, setSyncState] = useState({
     isRunning: false,
@@ -47,12 +48,15 @@ function Dashboard() {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(() => !isGuest)
   const [showSyncLogModal, setShowSyncLogModal] = useState(false)
+  const [showSyncOptionsModal, setShowSyncOptionsModal] = useState(false)
   const [currentSyncId, setCurrentSyncId] = useState(null)
+  const [selectedSyncRange, setSelectedSyncRange] = useState(null)
   
   const syncCheckRef = useRef(false)
   
   // Use SSE hook for progress updates (NO POLLING)
-  const { event: progressEvent, connected, reconnecting, error: sseError } = useGmailSyncProgress(currentSyncId)
+  // STATELESS: Hook handles fetchSyncStatus on refresh, reconnection, etc.
+  const { event: progressEvent, connected, reconnecting, error: sseError, syncStatus } = useGmailSyncProgress(currentSyncId)
 
   // Load initial data – guest uses mock only (no API). Google users call backend.
   useEffect(() => {
@@ -73,12 +77,17 @@ function Dashboard() {
       const newLog = {
         time: progressEvent.ts,
         message: progressEvent.message,
-        type: progressEvent.level || 'info'
+        type: progressEvent.level || 'info',
+        email_id: progressEvent.email_id,  // Include email_id for per-email tracking
+        retry_count: progressEvent.retry_count,  // Include retry count
+        retry_after_seconds: progressEvent.retry_after_seconds  // Include backoff duration
       }
       
-      // Only add if it's a new log (different timestamp or message)
+      // Only add if it's a new log (different timestamp or message or email_id)
       const isNewLog = !existingLogs.some(log => 
-        log.time === newLog.time && log.message === newLog.message
+        log.time === newLog.time && 
+        log.message === newLog.message &&
+        log.email_id === newLog.email_id
       )
       const updatedLogs = isNewLog ? [...existingLogs, newLog] : existingLogs
       
@@ -89,7 +98,7 @@ function Dashboard() {
         isRunning,
         jobId: progressEvent.sync_id,
         progress: {
-          status: phase === 'done' ? 'completed' : phase === 'failed' ? 'failed' : 'running',
+          status: phase === 'done' ? 'completed' : phase === 'failed' ? 'failed' : phase === 'canceled' ? 'canceled' : 'running',
           state: phase.toUpperCase(),
           total_emails: counts.total_estimated || counts.listed || 0,
           total_scanned: counts.listed || counts.total_estimated || 0,
@@ -152,7 +161,19 @@ function Dashboard() {
 
   // NO POLLING - SSE hook handles all progress updates
 
-  const handleStartSync = async () => {
+  const handleCancelSync = async () => {
+    if (!syncState.jobId) return
+    
+    try {
+      await gmailService.stopSync(syncState.jobId)
+      // UI will update when SSE receives CANCELED event
+      // Don't optimistically update here - wait for SSE confirmation
+    } catch (err) {
+      setError(err.message || 'Failed to cancel sync')
+    }
+  }
+
+  const handleStartSync = () => {
     if (syncCheckRef.current || syncState.isRunning) {
       // If already running, just show the modal
       if (syncState.isRunning && syncState.jobId) {
@@ -160,6 +181,13 @@ function Dashboard() {
       }
       return
     }
+    // Show sync options modal first
+    setShowSyncOptionsModal(true)
+  }
+
+  const handleSyncOptionsConfirm = async (options) => {
+    setShowSyncOptionsModal(false)
+    setSelectedSyncRange(options)
     syncCheckRef.current = true
 
     try {
@@ -172,7 +200,10 @@ function Dashboard() {
         progress: null,
       })
       
-      const result = await gmailService.startSync()
+      const result = await gmailService.startSync({
+        range: options.range,
+        months: options.months
+      })
       // Contract: { "sync_id": "uuid", "status": "queued" }
       const syncId = result.sync_id || result.jobId
       if (syncId) {
@@ -242,6 +273,13 @@ function Dashboard() {
             </button>
           </div>
         </div>
+        {showSyncOptionsModal && (
+          <SyncOptionsModal
+            isOpen={showSyncOptionsModal}
+            onClose={() => setShowSyncOptionsModal(false)}
+            onConfirm={handleSyncOptionsConfirm}
+          />
+        )}
         {showSyncLogModal && (
           <SyncLogModal
             progress={syncState.progress}
@@ -249,6 +287,13 @@ function Dashboard() {
             onClose={() => {
               setShowSyncLogModal(false)
             }}
+            onCancel={handleCancelSync}
+            jobId={syncState.jobId}
+            connected={connected}
+            reconnecting={reconnecting}
+            sseError={sseError}
+            syncStatus={syncStatus}
+            selectedRange={selectedSyncRange}
           />
         )}
       </>
@@ -508,75 +553,138 @@ function Dashboard() {
               </div>
               
               {/* Profile Links */}
-              {(links.linkedin || links.portfolio || links.indeed || links.github || links.website || links.other) && (
+              {((links && links.length > 0) || (linksObject && (linksObject.linkedin || linksObject.portfolio || linksObject.indeed || linksObject.github || linksObject.website || linksObject.other))) && (
                 <div className="profile-links-section">
                   <div className="profile-links-label">Links</div>
                   <div className="profile-links-list">
-                    {links.linkedin && (
-                      <a 
-                        href={links.linkedin.startsWith('http') ? links.linkedin : `https://${links.linkedin}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="profile-link-item"
-                        title="LinkedIn"
-                      >
-                        <IconLinkedIn />
-                      </a>
-                    )}
-                    {links.portfolio && (
-                      <a 
-                        href={links.portfolio.startsWith('http') ? links.portfolio : `https://${links.portfolio}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="profile-link-item"
-                        title="Portfolio"
-                      >
-                        <IconGlobe />
-                      </a>
-                    )}
-                    {links.indeed && (
-                      <a 
-                        href={links.indeed.startsWith('http') ? links.indeed : `https://${links.indeed}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="profile-link-item"
-                        title="Indeed"
-                      >
-                        <IconLink />
-                      </a>
-                    )}
-                    {links.github && (
-                      <a 
-                        href={links.github.startsWith('http') ? links.github : `https://${links.github}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="profile-link-item"
-                        title="GitHub"
-                      >
-                        <IconGithub />
-                      </a>
-                    )}
-                    {links.website && (
-                      <a 
-                        href={links.website.startsWith('http') ? links.website : `https://${links.website}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="profile-link-item"
-                        title="Website"
-                      >
-                        <IconGlobe />
-                      </a>
-                    )}
-                    {links.other && (
-                      <a 
-                        href={links.other.startsWith('http') ? links.other : `https://${links.other}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="profile-link-item"
-                        title="Other"
-                      >
-                        <IconLink />
-                      </a>
+                    {/* Render links from array (new format) */}
+                    {links && links.length > 0 ? (
+                      links.map((link) => {
+                        if (link.type === 'linkedin') {
+                          return (
+                            <a
+                              key={link.id}
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="profile-link-item"
+                              title="LinkedIn"
+                            >
+                              <IconLinkedIn />
+                            </a>
+                          )
+                        } else if (link.type === 'github') {
+                          return (
+                            <a
+                              key={link.id}
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="profile-link-item"
+                              title="GitHub"
+                            >
+                              <IconGithub />
+                            </a>
+                          )
+                        } else if (link.type === 'portfolio') {
+                          return (
+                            <a
+                              key={link.id}
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="profile-link-item"
+                              title={link.label || 'Portfolio'}
+                            >
+                              <IconGlobe />
+                            </a>
+                          )
+                        } else if (link.type === 'custom') {
+                          return (
+                            <a
+                              key={link.id}
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="profile-link-item"
+                              title={link.label || 'Custom Link'}
+                            >
+                              <IconLink />
+                            </a>
+                          )
+                        }
+                        return null
+                      })
+                    ) : (
+                      /* Legacy format (linksObject) - for backward compatibility */
+                      <>
+                        {linksObject?.linkedin && (
+                          <a 
+                            href={linksObject.linkedin.startsWith('http') ? linksObject.linkedin : `https://${linksObject.linkedin}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="profile-link-item"
+                            title="LinkedIn"
+                          >
+                            <IconLinkedIn />
+                          </a>
+                        )}
+                        {linksObject?.portfolio && (
+                          <a 
+                            href={linksObject.portfolio.startsWith('http') ? linksObject.portfolio : `https://${linksObject.portfolio}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="profile-link-item"
+                            title="Portfolio"
+                          >
+                            <IconGlobe />
+                          </a>
+                        )}
+                        {linksObject?.indeed && (
+                          <a 
+                            href={linksObject.indeed.startsWith('http') ? linksObject.indeed : `https://${linksObject.indeed}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="profile-link-item"
+                            title="Indeed"
+                          >
+                            <IconLink />
+                          </a>
+                        )}
+                        {linksObject?.github && (
+                          <a 
+                            href={linksObject.github.startsWith('http') ? linksObject.github : `https://${linksObject.github}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="profile-link-item"
+                            title="GitHub"
+                          >
+                            <IconGithub />
+                          </a>
+                        )}
+                        {linksObject?.website && (
+                          <a 
+                            href={linksObject.website.startsWith('http') ? linksObject.website : `https://${linksObject.website}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="profile-link-item"
+                            title="Website"
+                          >
+                            <IconGlobe />
+                          </a>
+                        )}
+                        {linksObject?.other && (
+                          <a 
+                            href={linksObject.other.startsWith('http') ? linksObject.other : `https://${linksObject.other}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="profile-link-item"
+                            title="Other"
+                          >
+                            <IconLink />
+                          </a>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -636,6 +744,13 @@ function Dashboard() {
         </div>
       </div>
 
+      {showSyncOptionsModal && (
+        <SyncOptionsModal
+          isOpen={showSyncOptionsModal}
+          onClose={() => setShowSyncOptionsModal(false)}
+          onConfirm={handleSyncOptionsConfirm}
+        />
+      )}
       {showSyncLogModal && (
         <SyncLogModal
           progress={syncState.progress}
@@ -643,6 +758,10 @@ function Dashboard() {
           connected={connected}
           reconnecting={reconnecting}
           sseError={sseError}
+          onCancel={handleCancelSync}
+          jobId={syncState.jobId}
+          syncStatus={syncStatus}
+          selectedRange={selectedSyncRange}
           onClose={() => {
             setShowSyncLogModal(false)
             // Don't clear syncId - allow reconnection if user reopens

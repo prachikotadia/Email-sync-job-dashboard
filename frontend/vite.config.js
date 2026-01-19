@@ -14,6 +14,11 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: false,
-  }
+    sourcemap: true,  // Enable source maps for debugging TDZ errors
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.js',
+  },
 })

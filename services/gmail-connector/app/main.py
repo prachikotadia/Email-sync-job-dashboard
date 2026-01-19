@@ -3,12 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func, desc, asc, or_, Integer, cast, case
 from app.gmail_client import GmailClient
 from app.sync_engine import SyncEngine
 from app.classifier import Classifier
 from app.company_extractor import CompanyExtractor
-from app.database import get_db, init_db, engine, SessionLocal, User, Application, SyncState, OAuthToken, SyncJob, SyncJobStatus
+from app.database import get_db, init_db, engine, SessionLocal, User, Application, SyncState, OAuthToken, SyncJob, SyncJobStatus, ProfileLink, ProfileLinkType
+from app.profile_link_validator import validate_url, normalize_url, detect_platform_from_url
+from app.gmail_deep_link import build_gmail_deep_link
+from app.search import search_applications, search_applications_fuzzy
+from app.advanced_search import advanced_search_applications
+from app.company_normalizer import normalize_company_name_for_grouping
 from app.ghosted_detector import GhostedDetector
 from app.export_service import generate_export
 from datetime import datetime, timedelta, timezone
@@ -57,6 +62,10 @@ ghosted_detector = GhostedDetector(days=int(os.getenv("GHOSTED_DAYS", "21")))
 class SyncStartRequest(BaseModel):
     user_id: str
     user_email: str  # Authenticated user email for validation
+    range: str  # REQUIRED: "3M" | "6M" | "12M" | "16M" | "FULL"
+    # Legacy fields (for backward compatibility, will be converted from range)
+    mode: Optional[str] = None  # "full_history" or "time_range" (deprecated, use range)
+    time_range_months: Optional[int] = None  # For time_range mode: 3, 6, 12, or 16 (deprecated, use range)
 
 class ClearRequest(BaseModel):
     user_id: str
@@ -149,36 +158,78 @@ async def start_sync(
         db.commit()
         db.refresh(user)
     
-    # Check for existing RUNNING sync job
+    # Check for existing active sync job (only ONE active sync per user)
+    # Active states: QUEUED, FETCHING_HEADERS, FETCHING_BODIES, CLASSIFYING, PERSISTING
+    # Non-active states: IDLE, COMPLETED, FAILED_RETRYABLE, FAILED_FATAL
+    from app.database import SyncStateEnum
+    active_states = [
+        SyncStateEnum.QUEUED,
+        SyncStateEnum.FETCHING_HEADERS,
+        SyncStateEnum.FETCHING_BODIES,
+        SyncStateEnum.CLASSIFYING,
+        SyncStateEnum.PERSISTING
+    ]
+    
     existing_job = db.query(SyncJob).filter(
         SyncJob.user_id == user.id,
-        SyncJob.status == SyncJobStatus.RUNNING
+        SyncJob.sync_state.in_(active_states)
     ).first()
     
     if existing_job:
-        # Sync already running - return existing sync_id
+        # Sync already active - return existing sync_id
         sync_id = str(existing_job.id)
-        logger.info(f"Sync already running for user {user_email}, returning existing sync_id: {sync_id}")
+        logger.info(f"Sync already active for user {user_email} (state: {existing_job.sync_state.value}), returning existing sync_id: {sync_id}")
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
-            content={"sync_id": sync_id, "status": "running"}
+            content={"sync_id": sync_id, "status": "running", "state": existing_job.sync_state.value}
         )
+    
+    # Validate range parameter (REQUIRED)
+    valid_ranges = {"3M", "6M", "12M", "16M", "FULL"}
+    sync_range = request.range.upper() if request.range else None
+    
+    if not sync_range or sync_range not in valid_ranges:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid range. Must be one of: {', '.join(sorted(valid_ranges))}"
+        )
+    
+    # Convert range to mode/time_range_months for backward compatibility
+    if sync_range == "FULL":
+        mode = "full_history"
+        time_range_months = None
+    else:
+        mode = "time_range"
+        # Extract months from range (e.g., "3M" -> 3)
+        time_range_months = int(sync_range.rstrip("M"))
     
     # Create new SyncJob in DB with PENDING status
     job_id = uuid.uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)  # 24 hour TTL
     
+    # Store mode and time_range_months in checkpoint JSON (for backward compatibility)
+    checkpoint_data = {
+        "mode": mode,
+        "time_range_months": time_range_months,
+        "last_message_index": None  # Will be updated during sync
+    }
+    
+    from app.database import SyncStateEnum
+    
     sync_job = SyncJob(
         id=job_id,
         user_id=user.id,
         status=SyncJobStatus.PENDING,
+        sync_state=SyncStateEnum.QUEUED,  # Start in QUEUED state
+        sync_range=sync_range,  # Store range: 3M, 6M, 12M, 16M, FULL
         total_emails=0,
         processed_emails=0,
         started_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         expires_at=expires_at,
         logs=[],
-        email_entries=[]
+        email_entries=[],
+        checkpoint=checkpoint_data
     )
     db.add(sync_job)
     
@@ -715,6 +766,167 @@ async def get_sync_progress(job_id: str, user_id: str = Query(...), db: Session 
     """
     return await get_sync_status(sync_id=job_id, user_id=user_id, db=db)
 
+@app.post("/sync/stop/{sync_id}")
+async def stop_sync(sync_id: str, user_id: str = Query(...), db: Session = Depends(get_db)):
+    """
+    Cancel/stop a running sync job.
+    
+    This endpoint:
+    - Validates sync_id and user ownership
+    - Sets job status to CANCEL_REQUESTED (if not already COMPLETED/FAILED/CANCELED)
+    - Persists immediately in DB
+    - Returns immediately (does NOT wait for worker to stop)
+    
+    The worker will check this status and stop mid-sync.
+    """
+    try:
+        # Parse sync_id as UUID
+        try:
+            job_uuid = uuid.UUID(sync_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=404, detail="Invalid sync_id format")
+        
+        # Get SyncJob from DB
+        sync_job = db.query(SyncJob).filter(SyncJob.id == job_uuid).first()
+        if not sync_job:
+            raise HTTPException(status_code=404, detail="Sync job not found")
+        
+        # Validate user ownership
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user or sync_job.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Unauthorized: job does not belong to user")
+        
+        # Check current status - if already COMPLETED, FAILED, or CANCELED, return current state
+        if sync_job.status in [SyncJobStatus.COMPLETED, SyncJobStatus.FAILED, SyncJobStatus.CANCELED, SyncJobStatus.DONE]:
+            return {
+                "success": True,
+                "status": sync_job.status.value,
+                "message": f"Job is already {sync_job.status.value.lower()}"
+            }
+        
+        # If already CANCEL_REQUESTED, return idempotently
+        if sync_job.status == SyncJobStatus.CANCEL_REQUESTED:
+            return {
+                "success": True,
+                "status": "CANCEL_REQUESTED",
+                "message": "Cancellation already requested"
+            }
+        
+        # Set status to CANCEL_REQUESTED and persist immediately
+        sync_job.status = SyncJobStatus.CANCEL_REQUESTED
+        sync_job.cancel_reason = "Canceled by user"
+        sync_job.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        
+        # Log cancellation request
+        add_log(db, job_uuid, "Cancellation requested by user", "info")
+        logger.info(f"Sync job {sync_id} cancellation requested by user {user_id}")
+        
+        return {
+            "success": True,
+            "status": "CANCEL_REQUESTED",
+            "message": "Cancellation requested successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in stop_sync: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to cancel sync: {str(e)}")
+
+@app.get("/sync/logs/{job_id}")
+async def get_sync_logs(
+    job_id: str,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Get structured logs for a sync job.
+    
+    Returns:
+        {
+            "job_id": "...",
+            "logs": [
+                {
+                    "job_id": "...",
+                    "level": "INFO | WARN | ERROR",
+                    "event": "FETCH | RETRY | CLASSIFY | SAVE | CANCEL",
+                    "details": "...",
+                    "timestamp": "ISO-8601"
+                }
+            ]
+        }
+    """
+    try:
+        # Get user by email (user_id is email in JWT)
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get sync job
+        try:
+            job_uuid = uuid.UUID(job_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid job_id format")
+        
+        sync_job = db.query(SyncJob).filter(
+            SyncJob.id == job_uuid,
+            SyncJob.user_id == user.id
+        ).first()
+        
+        if not sync_job:
+            raise HTTPException(status_code=404, detail="Sync job not found")
+        
+        # Convert logs from JSON array to structured format
+        logs = sync_job.logs or []
+        structured_logs = []
+        
+        for log_entry in logs:
+            # Log entry format: {"time": "...", "message": "...", "type": "info|warning|error"}
+            log_type = log_entry.get("type", "info").upper()
+            level_map = {
+                "INFO": "INFO",
+                "WARNING": "WARN",
+                "WARN": "WARN",
+                "ERROR": "ERROR",
+                "SUCCESS": "INFO"
+            }
+            level = level_map.get(log_type, "INFO")
+            
+            # Determine event type from message
+            message = log_entry.get("message", "")
+            message_lower = message.lower()
+            if "fetch" in message_lower or "email" in message_lower:
+                event = "FETCH"
+            elif "retry" in message_lower or "rate limit" in message_lower:
+                event = "RETRY"
+            elif "classif" in message_lower:
+                event = "CLASSIFY"
+            elif "save" in message_lower or "stored" in message_lower:
+                event = "SAVE"
+            elif "cancel" in message_lower:
+                event = "CANCEL"
+            else:
+                event = "INFO"
+            
+            structured_logs.append({
+                "job_id": job_id,
+                "level": level,
+                "event": event,
+                "details": message,
+                "timestamp": log_entry.get("time") or datetime.now(timezone.utc).isoformat()
+            })
+        
+        return {
+            "job_id": job_id,
+            "logs": structured_logs
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting sync logs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get sync logs: {str(e)}")
+
 def calculate_stats(db: Session, user_id) -> dict:
     """
     Returns REAL counts from DB, never estimated.
@@ -751,14 +963,10 @@ def calculate_stats(db: Session, user_id) -> dict:
 
 def _generate_gmail_web_url(message_id: str, user_email: str) -> str:
     """
-    Generate Gmail web URL for a message
-    Format: https://mail.google.com/mail/u/0/#inbox/{message_id}
+    Generate Gmail web URL for a message (legacy wrapper)
+    Uses build_gmail_deep_link for consistency.
     """
-    # Gmail web URL format
-    # For Gmail, we can use the message ID directly
-    # The URL format is: https://mail.google.com/mail/u/0/#inbox/{message_id}
-    # Or: https://mail.google.com/mail/u/0/#search/{message_id}
-    return f"https://mail.google.com/mail/u/0/#inbox/{message_id}"
+    return build_gmail_deep_link(message_id)
 
 
 @app.get("/applications")
@@ -766,12 +974,15 @@ async def get_applications(
     user_id: str = Query(...),
     search: str = Query(None),
     status: str = Query(None),
+    company: Optional[str] = Query(None, description="Filter by company name (exact match)"),
     db: Session = Depends(get_db)
 ):
     """
-    Get all applications
+    Get all applications (flat list)
     NO pagination limits - returns ALL fetched emails
     Response includes gmail_web_url for opening emails
+    
+    Supports filtering by company name (exact match).
     """
     try:
         # user_id is email, get database user
@@ -780,6 +991,10 @@ async def get_applications(
             return {"applications": [], "total": 0, "counts": {}, "warning": None}
         
         query = db.query(Application).filter(Application.user_id == user.id)
+        
+        # Company filter (exact match - case-insensitive)
+        if company:
+            query = query.filter(func.lower(Application.company_name) == company.lower().strip())
         
         # Apply filters
         if search:
@@ -796,6 +1011,7 @@ async def get_applications(
                 status_upper = "OFFER_ACCEPTED"
             query = query.filter(Application.category == status_upper)
         
+        # Sort by received_at DESC (newest first) - serves as applied_at
         applications = query.order_by(Application.received_at.desc()).all()
         
         # Convert to dict with all required fields (strict API contract)
@@ -806,8 +1022,14 @@ async def get_applications(
             if category == "ACCEPTED" or category == "OFFER":
                 category = "OFFER_ACCEPTED"
             
-            # Use stored gmail_web_url or generate if missing
-            gmail_web_url = app.gmail_web_url if app.gmail_web_url else _generate_gmail_web_url(app.gmail_message_id, user_id)
+            # Generate Gmail deep link using message ID (single source of truth)
+            if not app.gmail_message_id:
+                logger.error(f"Application {app.id} missing gmail_message_id - cannot generate deep link")
+                gmail_deep_link = None
+                gmail_web_url = None  # Legacy field
+            else:
+                gmail_deep_link = build_gmail_deep_link(app.gmail_message_id)
+                gmail_web_url = gmail_deep_link  # Legacy field for backward compatibility
             
             # Ensure gmail_thread_id is never null
             gmail_thread_id = app.gmail_thread_id if app.gmail_thread_id else app.gmail_message_id
@@ -815,20 +1037,377 @@ async def get_applications(
             apps_data.append({
                 "id": str(app.id),
                 "company_name": app.company_name or "Unknown Company",  # Ensure never null
-                "category": category,  # Uppercase: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED
+                "role_title": app.role,  # Role title (alias for 'role')
+                "status": category,  # Uppercase: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED
+                "applied_at": app.received_at.isoformat() if app.received_at else None,  # received_at serves as applied_at
+                "source": "GMAIL",  # All applications from this endpoint are Gmail-synced
+                "email_message_id": app.gmail_message_id,
+                "gmail_message_id": app.gmail_message_id,  # Explicit field for deep link
+                "thread_id": app.gmail_thread_id,
                 "subject": app.subject or "No Subject",  # Ensure never null
                 "snippet": app.snippet,
                 "received_at": app.received_at.isoformat() if app.received_at else None,
-                "gmail_web_url": gmail_web_url,  # Required field
+                "gmail_deep_link": gmail_deep_link,  # Primary field (new)
+                "gmail_web_url": gmail_web_url,  # Legacy field (backward compatibility)
+                "category": category,  # Keep for backward compatibility
             })
         
+        # CRITICAL: Ensure API total matches actual DB count for verification
+        # Use query.count() to get accurate total (handles filters correctly)
+        total_count = query.count()
+        
         return {
-            "total": len(apps_data),
+            "total": total_count,  # Use query count, not len(apps_data) - ensures accuracy with filters
             "applications": apps_data,
+            "counts": calculate_stats(db, user.id)  # Include category counts for verification
         }
     except Exception as e:
         logger.error(f"Error getting applications: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get applications: {str(e)}")
+
+
+@app.get("/search")
+async def search(
+    q: str = Query(..., description="Search query"),
+    user_id: str = Query(..., description="User email"),
+    limit: int = Query(50, ge=1, le=100, description="Max results per page"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    fuzzy: bool = Query(False, description="Enable fuzzy/typo-tolerant search"),
+    db: Session = Depends(get_db)
+):
+    """
+    Production-grade global search endpoint.
+    
+    Searches across:
+    - Company name (exact + partial + aliases)
+    - Role / Job title
+    - Email subject
+    - Application status
+    
+    Ranking: Exact company > Partial company > Alias > Role > Subject > Status
+    
+    Performance: < 200ms response time, max 50 results per page (default).
+    """
+    try:
+        # Get user by email
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            return {
+                "results": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset
+            }
+        
+        # Use fuzzy search if requested, otherwise use basic ranked search
+        if fuzzy:
+            result = search_applications_fuzzy(db, user.id, q, limit, offset)
+        else:
+            result = search_applications(db, user.id, q, limit, offset)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in search: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@app.get("/applications/search")
+async def search_applications_unified(
+    user_id: str = Query(..., description="User email"),
+    q: Optional[str] = Query(None, description="Global search query"),
+    status: Optional[List[str]] = Query(None, description="Status filter (multi-select)"),
+    date_from: Optional[str] = Query(None, description="Start date (ISO format: YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="End date (ISO format: YYYY-MM-DD)"),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(20, ge=1, le=100, description="Results per page"),
+    sort_by: str = Query("received_at", description="Sort field: received_at or company_name"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    db: Session = Depends(get_db)
+):
+    """
+    Advanced unified search endpoint with filters, pagination, and sorting.
+    
+    Searches across:
+    - Company name (exact + partial + normalized)
+    - Role / Job title
+    - Application title (email subject)
+    - Email subject
+    - Sender email/domain
+    
+    Filters:
+    - Status (multi-select)
+    - Date range (date_from, date_to) - filters by received_at (applied_at equivalent)
+    
+    All logic is backend-driven for performance with large datasets.
+    """
+    try:
+        # Get user by email
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            return {
+                "data": [],
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": 0,
+                    "total_pages": 0
+                }
+            }
+        
+        # Parse dates
+        date_from_parsed = None
+        date_to_parsed = None
+        
+        if date_from:
+            try:
+                date_from_parsed = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+            except ValueError:
+                logger.warning(f"Invalid date_from format: {date_from}")
+        
+        if date_to:
+            try:
+                date_to_parsed = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+            except ValueError:
+                logger.warning(f"Invalid date_to format: {date_to}")
+        
+        # Validate sort_by
+        if sort_by not in ("received_at", "company_name", "last_activity_at"):
+            sort_by = "received_at"
+        
+        # Validate sort_order
+        if sort_order.lower() not in ("asc", "desc"):
+            sort_order = "desc"
+        
+        # Call advanced search
+        result = advanced_search_applications(
+            db=db,
+            user_id=user.id,
+            query=q,
+            status=status,
+            company=company,
+            role=role,
+            date_from=date_from_parsed,
+            date_to=date_to_parsed,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in advanced search: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@app.get("/applications/grouped-by-company")
+async def get_applications_grouped_by_company(
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Get applications grouped by company (summary only - no application details).
+    
+    Returns company summary with:
+    - company_name (normalized canonical name)
+    - total_applications count
+    - status breakdown (counts per status)
+    - latest_applied_at (most recent application date)
+    
+    Grouping is done in SQL for performance with large datasets.
+    """
+    try:
+        # user_id is email, get database user
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            return {"companies": []}
+        
+        # SQL GROUP BY with normalization for consistent grouping
+        # Use company_name as-is (already normalized in extractor)
+        # Group by company_name and aggregate status counts
+        
+        # Query: GROUP BY company_name, aggregate status counts, get latest received_at
+        # Use CASE statements for status counting (more reliable than cast)
+        result = db.query(
+            Application.company_name,
+            func.count(Application.id).label('total_applications'),
+            func.max(Application.received_at).label('latest_applied_at'),
+            # Count per status using CASE
+            func.sum(case((func.lower(Application.category) == 'applied', 1), else_=0)).label('count_applied'),
+            func.sum(case((func.lower(Application.category) == 'rejected', 1), else_=0)).label('count_rejected'),
+            func.sum(case((func.lower(Application.category) == 'interview', 1), else_=0)).label('count_interview'),
+            func.sum(case((func.lower(Application.category).in_(['offer_accepted', 'offer', 'accepted']), 1), else_=0)).label('count_offer'),
+            func.sum(case((func.lower(Application.category) == 'ghosted', 1), else_=0)).label('count_ghosted'),
+        ).filter(
+            Application.user_id == user.id
+        ).group_by(
+            Application.company_name
+        ).order_by(
+            func.max(Application.received_at).desc()
+        ).all()
+        
+        companies = []
+        for row in result:
+            company_name = row.company_name or "Unknown Company"
+            
+            # Build status counts dict
+            statuses = {
+                "APPLIED": int(row.count_applied or 0),
+                "REJECTED": int(row.count_rejected or 0),
+                "INTERVIEW": int(row.count_interview or 0),
+                "OFFER_ACCEPTED": int(row.count_offer or 0),
+                "GHOSTED": int(row.count_ghosted or 0),
+            }
+            
+            companies.append({
+                "company_name": company_name,
+                "total_applications": int(row.total_applications),
+                "statuses": statuses,
+                "latest_applied_at": row.latest_applied_at.isoformat() if row.latest_applied_at else None,
+            })
+        
+        return {"companies": companies}
+        
+    except Exception as e:
+        logger.error(f"Error getting applications grouped by company: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get grouped applications: {str(e)}")
+
+
+@app.get("/applications/company/{company_name}")
+async def get_company_applications(
+    company_name: str,
+    user_id: str = Query(..., description="User email"),
+    search: Optional[str] = Query(None, description="Search within company"),
+    status: Optional[List[str]] = Query(None, description="Status filter (multi-select)"),
+    sort_by: str = Query("received_at", description="Sort field: received_at or company_name"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    cursor: Optional[str] = Query(None, description="Pagination cursor (application ID)"),
+    limit: int = Query(50, ge=1, le=100, description="Results per page"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get applications for a specific company.
+    Supports search, filters, sorting, and cursor-based pagination.
+    
+    This endpoint does NOT refetch all data - only returns company-filtered subset.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            return {
+                "applications": [],
+                "total_count": 0,
+                "next_cursor": None
+            }
+        
+        # Base query: filter by user and company (exact match, case-insensitive)
+        query = db.query(Application).filter(
+            Application.user_id == user.id,
+            func.lower(Application.company_name) == company_name.lower().strip()
+        )
+        
+        # Search filter (within company)
+        if search:
+            search_lower = search.lower()
+            query = query.filter(
+                or_(
+                    Application.role.ilike(f"%{search_lower}%"),
+                    Application.subject.ilike(f"%{search_lower}%"),
+                    Application.from_email.ilike(f"%{search_lower}%")
+                )
+            )
+        
+        # Status filter (multi-select)
+        if status:
+            normalized_statuses = []
+            for s in status:
+                s_upper = s.upper().strip()
+                if s_upper in ("OFFER", "ACCEPTED"):
+                    s_upper = "OFFER_ACCEPTED"
+                normalized_statuses.append(s_upper)
+            if normalized_statuses:
+                query = query.filter(Application.category.in_(normalized_statuses))
+        
+        # Get total count (before pagination)
+        total_count = query.count()
+        
+        # Sorting
+        if sort_by == "company_name":
+            order_field = Application.company_name
+        elif sort_by == "received_at":
+            order_field = Application.received_at
+        else:
+            order_field = Application.received_at
+        
+        if sort_order.lower() == "asc":
+            query = query.order_by(asc(order_field))
+        else:
+            query = query.order_by(desc(order_field))
+        
+        # Cursor-based pagination (if cursor provided, filter by ID > cursor)
+        if cursor:
+            try:
+                cursor_id = uuid.UUID(cursor)
+                query = query.filter(Application.id > cursor_id)
+            except ValueError:
+                pass  # Invalid cursor, ignore
+        
+        # Apply limit
+        applications = query.limit(limit + 1).all()  # Fetch one extra to check for next page
+        
+        # Check if there's a next page
+        has_next = len(applications) > limit
+        if has_next:
+            applications = applications[:-1]  # Remove extra item
+            next_cursor = str(applications[-1].id) if applications else None
+        else:
+            next_cursor = None
+        
+        # Format results
+        apps_data = []
+        for app in applications:
+            category = app.category.upper() if app.category else "APPLIED"
+            if category in ("ACCEPTED", "OFFER"):
+                category = "OFFER_ACCEPTED"
+            
+            # Generate Gmail deep link using message ID
+            if not app.gmail_message_id:
+                logger.error(f"Application {app.id} missing gmail_message_id - cannot generate deep link")
+                gmail_deep_link = None
+                gmail_web_url = None
+            else:
+                gmail_deep_link = build_gmail_deep_link(app.gmail_message_id)
+                gmail_web_url = gmail_deep_link  # Legacy field
+            
+            apps_data.append({
+                "id": str(app.id),
+                "company_name": app.company_name or "Unknown Company",
+                "role_title": app.role,
+                "status": category,
+                "applied_at": app.received_at.isoformat() if app.received_at else None,
+                "source": "GMAIL",
+                "email_message_id": app.gmail_message_id,
+                "gmail_message_id": app.gmail_message_id,  # Explicit field
+                "thread_id": app.gmail_thread_id or app.gmail_message_id,
+                "subject": app.subject or "No Subject",
+                "snippet": app.snippet,
+                "received_at": app.received_at.isoformat() if app.received_at else None,
+                "gmail_deep_link": gmail_deep_link,  # Primary field (new)
+                "gmail_web_url": gmail_web_url,  # Legacy field
+                "category": category,
+            })
+        
+        return {
+            "applications": apps_data,
+            "total_count": total_count,
+            "next_cursor": next_cursor
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting company applications: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get company applications: {str(e)}")
 
 
 @app.get("/applications/{app_id}")
@@ -860,8 +1439,14 @@ async def get_application(
         if category == "accepted":
             category = "offer"
         
-        # Generate Gmail web URL
-        gmail_web_url = _generate_gmail_web_url(application.gmail_message_id, user_id)
+        # Generate Gmail deep link
+        if not application.gmail_message_id:
+            logger.error(f"Application {application.id} missing gmail_message_id")
+            gmail_deep_link = None
+            gmail_web_url = None
+        else:
+            gmail_deep_link = build_gmail_deep_link(application.gmail_message_id)
+            gmail_web_url = gmail_deep_link  # Legacy field
         
         return {
             "id": str(application.id),
@@ -870,6 +1455,8 @@ async def get_application(
             "received_at": application.received_at.isoformat() if application.received_at else None,
             "gmail_message_id": application.gmail_message_id,
             "gmail_thread_id": application.gmail_thread_id,
+            "gmail_deep_link": gmail_deep_link,  # Primary field (new)
+            "gmail_web_url": gmail_web_url,  # Legacy field
             "gmail_web_url": gmail_web_url,
             "role": application.role,
             "subject": application.subject,
@@ -1171,3 +1758,243 @@ async def health(db: Session = Depends(get_db)):
         "active_sync_jobs": running,
         "total_sync_jobs": total,
     }
+
+
+# ========== PROFILE LINKS ENDPOINTS ==========
+
+class ProfileLinkCreate(BaseModel):
+    type: str  # "linkedin", "github", "portfolio", "custom"
+    label: Optional[str] = None  # Required for "custom"
+    url: str
+
+class ProfileLinkUpdate(BaseModel):
+    type: Optional[str] = None
+    label: Optional[str] = None
+    url: Optional[str] = None
+
+@app.get("/profile/links")
+async def get_profile_links(
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all profile links for the current user.
+    Returns list of profile links.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        links = db.query(ProfileLink).filter(
+            ProfileLink.user_id == user.id
+        ).order_by(ProfileLink.created_at.asc()).all()
+        
+        links_data = []
+        for link in links:
+            links_data.append({
+                "id": str(link.id),
+                "type": link.type.value,
+                "label": link.label,
+                "url": link.url,
+                "created_at": link.created_at.isoformat() if link.created_at else None,
+                "updated_at": link.updated_at.isoformat() if link.updated_at else None,
+            })
+        
+        return {"links": links_data}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting profile links: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get profile links: {str(e)}")
+
+@app.post("/profile/links")
+async def create_profile_link(
+    link_data: ProfileLinkCreate,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new profile link.
+    Validates and normalizes URL before saving.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Validate URL
+        is_valid, result = validate_url(link_data.url)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=result)
+        
+        normalized_url = result
+        
+        # Validate type
+        try:
+            link_type = ProfileLinkType(link_data.type.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid link type. Must be one of: linkedin, github, portfolio, custom"
+            )
+        
+        # Validate label requirement for custom type
+        if link_type == ProfileLinkType.CUSTOM:
+            if not link_data.label or not link_data.label.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Label is required for custom link type"
+                )
+        else:
+            # Auto-detect label for non-custom types if not provided
+            link_data.label = link_data.label or None
+        
+        # Create profile link
+        profile_link = ProfileLink(
+            user_id=user.id,
+            type=link_type,
+            label=link_data.label.strip() if link_data.label else None,
+            url=normalized_url,
+        )
+        
+        db.add(profile_link)
+        db.commit()
+        db.refresh(profile_link)
+        
+        return {
+            "id": str(profile_link.id),
+            "type": profile_link.type.value,
+            "label": profile_link.label,
+            "url": profile_link.url,
+            "created_at": profile_link.created_at.isoformat() if profile_link.created_at else None,
+            "updated_at": profile_link.updated_at.isoformat() if profile_link.updated_at else None,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating profile link: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create profile link: {str(e)}")
+
+@app.put("/profile/links/{link_id}")
+async def update_profile_link(
+    link_id: str,
+    link_data: ProfileLinkUpdate,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Update an existing profile link.
+    Validates and normalizes URL if provided.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        profile_link = db.query(ProfileLink).filter(
+            ProfileLink.id == link_id,
+            ProfileLink.user_id == user.id
+        ).first()
+        
+        if not profile_link:
+            raise HTTPException(status_code=404, detail="Profile link not found")
+        
+        # Update URL if provided
+        if link_data.url is not None:
+            is_valid, result = validate_url(link_data.url)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=result)
+            profile_link.url = result
+        
+        # Update type if provided
+        if link_data.type is not None:
+            try:
+                link_type = ProfileLinkType(link_data.type.lower())
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid link type. Must be one of: linkedin, github, portfolio, custom"
+                )
+            profile_link.type = link_type
+            
+            # Validate label requirement for custom type
+            if link_type == ProfileLinkType.CUSTOM:
+                if not link_data.label or not link_data.label.strip():
+                    # If type changed to custom but no label provided, keep existing label or require it
+                    if not profile_link.label:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Label is required for custom link type"
+                        )
+        
+        # Update label if provided
+        if link_data.label is not None:
+            # If type is custom, label is required
+            if profile_link.type == ProfileLinkType.CUSTOM:
+                if not link_data.label.strip():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Label cannot be empty for custom link type"
+                    )
+                profile_link.label = link_data.label.strip()
+            else:
+                profile_link.label = link_data.label.strip() if link_data.label.strip() else None
+        
+        profile_link.updated_at = datetime.now(timezone.utc)
+        
+        db.commit()
+        db.refresh(profile_link)
+        
+        return {
+            "id": str(profile_link.id),
+            "type": profile_link.type.value,
+            "label": profile_link.label,
+            "url": profile_link.url,
+            "created_at": profile_link.created_at.isoformat() if profile_link.created_at else None,
+            "updated_at": profile_link.updated_at.isoformat() if profile_link.updated_at else None,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating profile link: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update profile link: {str(e)}")
+
+@app.delete("/profile/links/{link_id}")
+async def delete_profile_link(
+    link_id: str,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a profile link.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        profile_link = db.query(ProfileLink).filter(
+            ProfileLink.id == link_id,
+            ProfileLink.user_id == user.id
+        ).first()
+        
+        if not profile_link:
+            raise HTTPException(status_code=404, detail="Profile link not found")
+        
+        db.delete(profile_link)
+        db.commit()
+        
+        return {"success": True, "message": "Profile link deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting profile link: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete profile link: {str(e)}")

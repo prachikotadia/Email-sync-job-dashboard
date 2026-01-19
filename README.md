@@ -16,33 +16,81 @@ This project uses a microservices architecture with Docker:
 
 ### Prerequisites
 
-- Docker & Docker Compose
+- Docker & Docker Compose (or Docker Desktop)
 - Google OAuth credentials (Client ID & Secret)
 
 ### Setup
+
+#### For macOS/Linux:
 
 1. **Clone and navigate to the project:**
    ```bash
    cd job-tracker
    ```
 
-2. **Create `.env` file:**
+2. **Run setup script:**
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
+   ```
+
+3. **Or manually create `.env` file:**
    ```bash
    cp .env.example .env
    ```
 
-3. **Update `.env` with your credentials:**
+4. **Update `.env` with your credentials:**
    - Add your `GOOGLE_CLIENT_ID`
    - Add your `GOOGLE_CLIENT_SECRET`
-   - Set a strong `JWT_SECRET`
+   - Set a strong `JWT_SECRET` (generate with: `openssl rand -hex 32`)
    - Database credentials are pre-configured (change if needed)
 
-4. **Start all services:**
+5. **Start all services:**
    ```bash
    docker-compose up --build
    ```
 
-5. **Access the application:**
+#### For Windows:
+
+1. **Clone and navigate to the project:**
+   ```cmd
+   cd job-tracker
+   ```
+
+2. **Run setup script (choose one):**
+   
+   **Option A - PowerShell (Recommended):**
+   ```powershell
+   .\setup.ps1
+   ```
+   
+   **Option B - Command Prompt:**
+   ```cmd
+   setup.bat
+   ```
+
+3. **Or manually create `.env` file:**
+   ```cmd
+   copy .env.example .env
+   ```
+
+4. **Update `.env` with your credentials:**
+   - Add your `GOOGLE_CLIENT_ID`
+   - Add your `GOOGLE_CLIENT_SECRET`
+   - Set a strong `JWT_SECRET` (generate with PowerShell: `python -c "import secrets; print(secrets.token_hex(32))"`)
+   - Database credentials are pre-configured (change if needed)
+
+5. **Start all services:**
+   ```cmd
+   docker-compose up --build
+   ```
+   
+   **Note:** If using newer Docker Desktop, use:
+   ```cmd
+   docker compose up --build
+   ```
+
+6. **Access the application:**
    - Frontend: http://localhost:3000
    - API Gateway: http://localhost:8000
 
@@ -113,6 +161,11 @@ docker-compose down -v
 - **Sync stuck**: Restart the gmail-connector service to release locks
 - **Auth errors**: Verify Google OAuth credentials in `.env`
 - **Port conflicts**: Modify ports in `docker-compose.yml`
+- **Windows issues**: See [WINDOWS_SETUP.md](./WINDOWS_SETUP.md) for Windows-specific troubleshooting
+
+## 🪟 Windows Users
+
+See [WINDOWS_SETUP.md](./WINDOWS_SETUP.md) for detailed Windows-specific setup instructions, common issues, and solutions.
 
 ## 📄 License
 

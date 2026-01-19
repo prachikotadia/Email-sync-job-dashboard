@@ -1,0 +1,297 @@
+.sync-options-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeIn 0.2s ease-out;
+}
+
+[data-theme="light"] .sync-options-modal-overlay {
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.sync-options-modal {
+  background: var(--bg-elevated);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  width: 90%;
+  max-width: 500px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  animation: slideUp 0.3s ease-out;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+}
+
+[data-theme="light"] .sync-options-modal {
+  background: #ffffff;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--border-subtle);
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.sync-options-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.sync-options-modal-header h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sync-options-modal-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.sync-options-modal-close:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.sync-options-modal-content {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.sync-options-description {
+  margin: 0 0 24px 0;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.sync-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.sync-option-item {
+  display: flex;
+  align-items: center;
+  padding: 16px;
+  border: 2px solid var(--border-subtle);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--bg-card);
+  position: relative;
+}
+
+[data-theme="light"] .sync-option-item {
+  background: #ffffff;
+  border: 2px solid var(--border-subtle);
+}
+
+.sync-option-item:hover {
+  border-color: var(--accent);
+  background: var(--bg-secondary);
+}
+
+[data-theme="light"] .sync-option-item:hover {
+  background: #f8fafc;
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.1);
+}
+
+.sync-option-item.selected {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), var(--bg-secondary));
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.15);
+}
+
+[data-theme="light"] .sync-option-item.selected {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(99, 102, 241, 0.05));
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.2);
+}
+
+.sync-option-item input[type="radio"] {
+  margin-right: 12px;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.sync-option-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sync-option-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.sync-option-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+}
+
+.sync-option-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin-left: 32px;
+}
+
+.sync-option-warning-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--warning-color, #f59e0b);
+}
+
+.sync-option-check {
+  width: 24px;
+  height: 24px;
+  color: var(--accent);
+  margin-left: 12px;
+}
+
+.sync-options-warning-box {
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 12px;
+  margin-top: 16px;
+}
+
+.sync-options-warning-icon {
+  width: 24px;
+  height: 24px;
+  color: var(--warning-color, #f59e0b);
+  flex-shrink: 0;
+}
+
+.sync-options-warning-box strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+.sync-options-warning-box p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.sync-options-modal-actions {
+  display: flex;
+  gap: 12px;
+  padding: 24px;
+  border-top: 1px solid var(--border-subtle);
+  justify-content: flex-end;
+}
+
+.sync-options-modal-btn-secondary,
+.sync-options-modal-btn-primary {
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+
+.sync-options-modal-btn-secondary {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+}
+
+[data-theme="light"] .sync-options-modal-btn-secondary {
+  background: #ffffff;
+  border: 1px solid var(--border-subtle);
+}
+
+.sync-options-modal-btn-secondary:hover {
+  background: var(--bg-tertiary);
+}
+
+[data-theme="light"] .sync-options-modal-btn-secondary:hover {
+  background: #f8fafc;
+  border-color: var(--accent);
+}
+
+.sync-options-modal-btn-primary {
+  background: var(--accent);
+  color: white;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+[data-theme="light"] .sync-options-modal-btn-primary {
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+}
+
+.sync-options-modal-btn-primary:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.4);
+  transform: translateY(-1px);
+}
+
+[data-theme="light"] .sync-options-modal-btn-primary:hover {
+  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+}
+
+.sync-options-modal-btn-primary:active {
+  transform: translateY(0);
+}

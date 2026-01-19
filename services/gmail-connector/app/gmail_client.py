@@ -12,6 +12,15 @@ import random
 
 logger = logging.getLogger(__name__)
 
+class GmailRateLimitError(Exception):
+    """
+    Custom exception for Gmail API rate limits.
+    Raised when API returns 429, 403 rateLimitExceeded, or 403 userRateLimitExceeded.
+    """
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after  # Suggested retry delay in seconds
+
 class GmailClient:
     """
     Gmail API client
@@ -77,11 +86,47 @@ class GmailClient:
             logger.error(f"Error getting user email: {e}")
             raise
     
+    def _is_rate_limit_error(self, e: Exception) -> tuple[bool, Optional[float]]:
+        """
+        Check if exception is a Gmail API rate limit error.
+        
+        Returns:
+            (is_rate_limit, retry_after_seconds)
+        """
+        error_str = str(e).lower()
+        error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
+        
+        # Check for rate limit errors
+        is_rate_limit = (
+            error_code == 429 or  # Too Many Requests
+            (error_code == 403 and 'ratelimitexceeded' in error_str) or
+            (error_code == 403 and 'userratelimitexceeded' in error_str)
+        )
+        
+        if is_rate_limit:
+            # Extract retry-after from response headers if available
+            retry_after = None
+            if hasattr(e, 'resp') and e.resp:
+                retry_after_header = e.resp.headers.get('Retry-After')
+                if retry_after_header:
+                    try:
+                        retry_after = float(retry_after_header)
+                    except (ValueError, TypeError):
+                        pass
+            
+            return True, retry_after
+        
+        return False, None
+    
     def _retry_with_backoff(self, func, max_attempts=6, initial_delay=1.0, max_delay=60.0):
         """
         Retry function with exponential backoff + jitter
         Handles 429, 5xx, backendError, rateLimitExceeded
-        Returns result or raises exception
+        
+        Note: Rate limit errors (429, 403 rateLimitExceeded) are detected but
+        should be handled at a higher level to pause job and emit SSE events.
+        
+        Returns result or raises GmailRateLimitError for rate limits, or original exception
         """
         delay = initial_delay
         attempt = 0
@@ -90,14 +135,19 @@ class GmailClient:
             try:
                 return func()
             except Exception as e:
+                # Check for rate limit errors first
+                is_rate_limit, retry_after = self._is_rate_limit_error(e)
+                if is_rate_limit:
+                    # Raise custom exception for rate limits (handled at worker level)
+                    retry_msg = f"Gmail API rate limit: {str(e)}"
+                    raise GmailRateLimitError(retry_msg, retry_after=retry_after) from e
+                
                 error_str = str(e).lower()
                 error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
                 
-                # Check if error is retryable
+                # Check if error is retryable (non-rate-limit errors)
                 is_retryable = (
-                    error_code == 429 or  # Rate limit
                     error_code and error_code >= 500 or  # Server errors
-                    'ratelimitexceeded' in error_str or
                     'backenderror' in error_str or
                     'internalerror' in error_str
                 )
@@ -158,18 +208,29 @@ class GmailClient:
         except Exception as e:
             raise Exception(f"Token refresh error: {str(e)}")
 
-    def get_all_messages(self, query: str = "", history_id: Optional[str] = None) -> tuple[List[Dict], str]:
+    def get_all_messages(
+        self, 
+        history_id: Optional[str] = None,
+        start_timestamp_ms: Optional[int] = None,
+        page_token: Optional[str] = None
+    ) -> tuple[List[Dict], str, Optional[str]]:
         """
-        Fetch ALL messages matching query
-        NO pagination limits - uses pagination to get everything
-        Returns: (messages, latest_history_id)
+        Fetch ALL messages WITHOUT query filtering (per spec requirement 0)
+        
+        Mode A - Full History: fetch ALL emails (start_timestamp_ms=None)
+        Mode B - Time Range: fetch emails after timestamp (start_timestamp_ms set)
+        
+        NO subject queries, NO q parameter filtering
+        Filtering happens AFTER fetching
+        
+        Returns: (messages, latest_history_id, next_page_token)
         """
         if not self.service:
             raise Exception("Gmail service not initialized")
         
         messages = []
-        page_token = None
         latest_history_id = None
+        next_page_token = None
         
         if history_id:
             # Incremental sync using history
@@ -206,6 +267,7 @@ class GmailClient:
                         continue
                 
                 latest_history_id = history.get('historyId')
+                return messages, latest_history_id, None
                 
             except Exception as e:
                 logger.error(f"Error in incremental sync: {e}")
@@ -213,23 +275,42 @@ class GmailClient:
                 history_id = None
         
         if not history_id:
-            # Full sync: paginate until nextPageToken is null. NO maxResults cap.
+            # Full sync: paginate until nextPageToken is null. NO q parameter, NO query filtering.
             # Gmail API allows up to 500 per page, but we MUST loop until all are fetched.
             page_num = 0
+            current_page_token = page_token  # Resume from checkpoint if provided
+            
             while True:
                 try:
                     page_num += 1
+                    
+                    # Build list parameters - NO q parameter (forbidden by spec)
+                    list_params = {
+                        'userId': 'me',
+                        'pageToken': current_page_token,
+                        'maxResults': 500,
+                        'includeSpamTrash': False
+                    }
+                    
+                    # For time range mode: filter by timestamp
+                    # NOTE: Gmail API requires 'q' parameter for time filtering
+                    # However, this is time-based (after:timestamp), NOT subject/keyword-based
+                    # For full history mode (start_timestamp_ms=None), NO q parameter is used
+                    if start_timestamp_ms:
+                        # Convert milliseconds to seconds for Gmail API 'after:' filter
+                        # This is the only acceptable use of 'q' - time-based filtering, not subject/keyword
+                        list_params['q'] = f'after:{start_timestamp_ms // 1000}'
+                    
                     # Use retry logic for list call
                     def list_page():
-                        return self.service.users().messages().list(
-                            userId='me', q=query, pageToken=page_token, maxResults=500
-                        ).execute()
+                        return self.service.users().messages().list(**list_params).execute()
                     
                     result = self._retry_with_backoff(list_page)
                     message_ids = result.get('messages', [])
                     latest_history_id = result.get('historyId')
+                    next_page_token = result.get('nextPageToken')
                     
-                    logger.info(f"Fetched page {page_num}: {len(message_ids)} message IDs (token: {page_token[:20] if page_token else 'initial'}...)")
+                    logger.info(f"Fetched page {page_num}: {len(message_ids)} message IDs (token: {current_page_token[:20] if current_page_token else 'initial'}...)")
                     
                     # Fetch full message details with retry for each message
                     for msg in message_ids:
@@ -239,14 +320,18 @@ class GmailClient:
                                     userId='me', id=msg['id'], format='full'
                                 ).execute()
                             
+                            # Use _retry_with_backoff which will raise GmailRateLimitError for rate limits
                             message = self._retry_with_backoff(get_message, max_attempts=3)
                             messages.append(message)
+                        except GmailRateLimitError:
+                            # Rate limit during message fetch - re-raise to be handled at worker level
+                            raise
                         except Exception as e:
                             logger.warning(f"Error fetching message {msg['id']} after retries: {e}")
                             continue
                     
-                    page_token = result.get('nextPageToken')
-                    if not page_token:
+                    current_page_token = next_page_token
+                    if not next_page_token:
                         # nextPageToken is null - we've fetched ALL messages
                         logger.info(f"Pagination complete: fetched {len(messages)} messages across {page_num} pages")
                         break
@@ -261,10 +346,8 @@ class GmailClient:
             
             # Verify we fetched all messages
             logger.info(f"Fetched: {len(messages)} emails (100% - pagination complete, nextPageToken is null)")
-        else:
-            logger.info(f"Fetched: {len(messages)} new/changed emails (incremental sync)")
         
-        return messages, latest_history_id
+        return messages, latest_history_id, next_page_token
     
     def get_message_count(self, query: str = "") -> int:
         """

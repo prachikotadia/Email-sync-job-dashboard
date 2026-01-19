@@ -38,6 +38,7 @@ class SyncPhase:
     DONE = "done"
     FAILED = "failed"
     CANCELED = "canceled"
+    RATE_LIMITED = "rate_limited"  # Job paused due to Gmail API rate limits
 
 # Event levels
 class EventLevel:
@@ -54,7 +55,10 @@ def create_progress_event(
     rate: Optional[Dict[str, float]] = None,
     cursor: Optional[Dict[str, Optional[str]]] = None,
     errors: Optional[List[Dict[str, Any]]] = None,
-    done: bool = False
+    done: bool = False,
+    email_id: Optional[str] = None,  # Gmail message ID for per-email tracking
+    retry_count: Optional[int] = None,  # Retry attempt number
+    retry_after_seconds: Optional[float] = None  # Backoff delay in seconds
 ) -> Dict[str, Any]:
     """
     Create a canonical progress event following the strict schema.
@@ -98,7 +102,10 @@ def create_progress_event(
             "history_id": None
         },
         "errors": errors or [],
-        "done": done
+        "done": done,
+        "email_id": email_id,  # Gmail message ID for per-email tracking
+        "retry_count": retry_count,  # Retry attempt number
+        "retry_after_seconds": retry_after_seconds  # Backoff delay in seconds
     }
     return event
 

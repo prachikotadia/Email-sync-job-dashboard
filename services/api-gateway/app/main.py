@@ -6,7 +6,7 @@ import os
 import time
 import logging
 from datetime import datetime, timezone
-from app.routers import auth, gmail, export, resume, sse
+from app.routers import auth, gmail, export, resume, sse, profile
 from app.middleware.auth_middleware import verify_token
 
 # Configure logging
@@ -40,6 +40,7 @@ app.include_router(gmail.router, prefix="/api/gmail", tags=["gmail"])
 app.include_router(sse.router, prefix="/api/gmail", tags=["gmail"])
 app.include_router(export.router, prefix="/api/exports", tags=["exports"])
 app.include_router(resume.router, prefix="/api/resumes", tags=["resumes"])
+app.include_router(profile.router, prefix="/api", tags=["profile"])
 
 
 

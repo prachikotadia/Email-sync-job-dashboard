@@ -20,12 +20,38 @@
   --bg-base: #0f172a;
   --bg-card: #1a2234;
   --bg-elevated: #1e293b;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
   --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
   --text: #e2e8f0;
+  --text-primary: #e2e8f0;
+  --text-secondary: #cbd5e1;
   --text-muted: #94a3b8;
   --text-dim: #64748b;
   --accent: #6366f1;
   --accent-light: #818cf8;
+  --accent-hover: #818cf8;
+  /* Status colors - optimized for dark theme */
+  --status-applied-bg: rgba(99, 102, 241, 0.2);
+  --status-applied-text: #a5b4fc;
+  --status-applied-border: rgba(99, 102, 241, 0.4);
+  --status-rejected-bg: rgba(239, 68, 68, 0.2);
+  --status-rejected-text: #fca5a5;
+  --status-rejected-border: rgba(239, 68, 68, 0.4);
+  --status-interview-bg: rgba(59, 130, 246, 0.2);
+  --status-interview-text: #93c5fd;
+  --status-interview-border: rgba(59, 130, 246, 0.4);
+  --status-offer-bg: rgba(34, 197, 94, 0.2);
+  --status-offer-text: #86efac;
+  --status-offer-border: rgba(34, 197, 94, 0.4);
+  --status-ghosted-bg: rgba(100, 116, 139, 0.2);
+  --status-ghosted-text: #cbd5e1;
+  --status-ghosted-border: rgba(100, 116, 139, 0.4);
+  /* Overlay colors */
+  --overlay-light: rgba(255, 255, 255, 0.05);
+  --overlay-dark: rgba(0, 0, 0, 0.2);
+  --overlay-hover: rgba(255, 255, 255, 0.08);
 }
 
 /* ===== LIGHT MODE (Perfect Shades) ===== */
@@ -39,12 +65,38 @@
   --bg-base: #f8fafc;
   --bg-card: #ffffff;
   --bg-elevated: #ffffff;
-  --border-subtle: rgba(0, 0, 0, 0.08);
+  --bg-secondary: #f1f5f9;
+  --bg-tertiary: #e2e8f0;
+  --border-subtle: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.15);
   --text: #0f172a;
-  --text-muted: #475569;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
   --text-dim: #94a3b8;
   --accent: #6366f1;
   --accent-light: #818cf8;
+  --accent-hover: #4f46e5;
+  /* Status colors - optimized for light theme */
+  --status-applied-bg: rgba(99, 102, 241, 0.1);
+  --status-applied-text: #4f46e5;
+  --status-applied-border: rgba(99, 102, 241, 0.3);
+  --status-rejected-bg: rgba(239, 68, 68, 0.1);
+  --status-rejected-text: #dc2626;
+  --status-rejected-border: rgba(239, 68, 68, 0.3);
+  --status-interview-bg: rgba(59, 130, 246, 0.1);
+  --status-interview-text: #2563eb;
+  --status-interview-border: rgba(59, 130, 246, 0.3);
+  --status-offer-bg: rgba(34, 197, 94, 0.1);
+  --status-offer-text: #16a34a;
+  --status-offer-border: rgba(34, 197, 94, 0.3);
+  --status-ghosted-bg: rgba(100, 116, 139, 0.1);
+  --status-ghosted-text: #64748b;
+  --status-ghosted-border: rgba(100, 116, 139, 0.3);
+  /* Overlay colors */
+  --overlay-light: rgba(255, 255, 255, 0.9);
+  --overlay-dark: rgba(0, 0, 0, 0.05);
+  --overlay-hover: rgba(0, 0, 0, 0.08);
 }
 
 * {

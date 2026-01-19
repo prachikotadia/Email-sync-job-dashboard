@@ -102,6 +102,7 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - REDIRECT_URI=${REDIRECT_URI:-http://localhost:8000/api/auth/callback}
       - DATABASE_URL=postgresql://${DB_USER:-jobpulse}:${DB_PASSWORD:-jobpulse_password}@db:5432/${DB_NAME:-jobpulse_db}
+      - GMAIL_SERVICE_URL=http://gmail-connector-service:8002
     depends_on:
       db:
         condition: service_healthy

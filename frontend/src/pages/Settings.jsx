@@ -1,20 +1,55 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { useAuth } from '../context/AuthContext'
 import { useProfileImage } from '../context/ProfileImageContext'
 import { useProfileLinks } from '../context/ProfileLinksContext'
-import { IconUser, IconMail, IconSignOut, IconSettings, IconUpload, IconX, IconLinkedIn, IconGithub, IconLink, IconGlobe, IconEdit } from '../components/icons'
+import { IconUser, IconMail, IconSignOut, IconSettings, IconUpload, IconX, IconLinkedIn, IconGithub, IconLink, IconGlobe, IconEdit, IconTrash, IconPlus } from '../components/icons'
+import { toast } from '../utils/toast'
+import { validateUrl, detectPlatformFromUrl } from '../utils/urlValidator'
 import '../styles/Settings.css'
+
+// Platform options for dropdown
+const PLATFORM_OPTIONS = [
+  { value: 'linkedin', label: 'LinkedIn', icon: IconLinkedIn },
+  { value: 'github', label: 'GitHub', icon: IconGithub },
+  { value: 'portfolio', label: 'Portfolio / Website', icon: IconGlobe },
+  { value: 'custom', label: 'Custom Link', icon: IconLink },
+]
 
 function Settings() {
   const { user, logout, isGuest, logoutGuest } = useAuth()
   const { profileImage, uploadProfileImage, removeProfileImage } = useProfileImage()
-  const { links, updateLinks } = useProfileLinks()
+  const { links, loading: linksLoading, createLink, updateLink, deleteLink } = useProfileLinks()
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState(null)
-  const [editingLinks, setEditingLinks] = useState(false)
-  const [linkForm, setLinkForm] = useState(links)
-  const [linkError, setLinkError] = useState(null)
+  const [showLinkModal, setShowLinkModal] = useState(false)
+  const [editingLink, setEditingLink] = useState(null) // Link being edited, or null for new
+  const [linkForm, setLinkForm] = useState({ type: 'linkedin', label: '', url: '' })
+  const [urlValidation, setUrlValidation] = useState({ isValid: null, error: null })
+  const [saving, setSaving] = useState(false)
   const fileInputRef = useRef(null)
+
+  // Auto-detect platform when URL changes
+  useEffect(() => {
+    if (linkForm.url && !editingLink) {
+      const detected = detectPlatformFromUrl(linkForm.url)
+      if (detected && linkForm.type === 'linkedin') {
+        // Only auto-detect if user hasn't manually selected a different type
+        setLinkForm(prev => ({ ...prev, type: detected }))
+      }
+    }
+  }, [linkForm.url, editingLink])
+
+  // Real-time URL validation
+  useEffect(() => {
+    if (!linkForm.url) {
+      setUrlValidation({ isValid: null, error: null })
+      return
+    }
+
+    const validation = validateUrl(linkForm.url)
+    setUrlValidation(validation)
+  }, [linkForm.url])
 
   const handleSignOut = async () => {
     if (isGuest) {
@@ -33,11 +68,12 @@ function Settings() {
 
     try {
       await uploadProfileImage(file)
+      toast.success('Profile image uploaded successfully')
     } catch (error) {
       setUploadError(error.message)
+      toast.error(error.message || 'Failed to upload image')
     } finally {
       setUploading(false)
-      // Reset input
       if (fileInputRef.current) {
         fileInputRef.current.value = ''
       }
@@ -46,47 +82,125 @@ function Settings() {
 
   const handleRemoveImage = () => {
     removeProfileImage()
+    toast.success('Profile image removed')
   }
 
   const handleUploadClick = () => {
     fileInputRef.current?.click()
   }
 
-  const handleLinkChange = (platform, value) => {
-    setLinkForm(prev => ({
-      ...prev,
-      [platform]: value
-    }))
-    setLinkError(null)
+  // Open modal to add new link
+  const handleAddLink = () => {
+    setEditingLink(null)
+    setLinkForm({ type: 'linkedin', label: '', url: '' })
+    setUrlValidation({ isValid: null, error: null })
+    setShowLinkModal(true)
   }
 
-  const handleSaveLinks = () => {
+  // Open modal to edit existing link
+  const handleEditLink = (link) => {
+    setEditingLink(link)
+    setLinkForm({
+      type: link.type,
+      label: link.label || '',
+      url: link.url,
+    })
+    setUrlValidation({ isValid: true, error: null }) // Assume valid for existing links
+    setShowLinkModal(true)
+  }
+
+  // Delete link
+  const handleDeleteLink = async (linkId) => {
+    if (!window.confirm('Are you sure you want to delete this link?')) {
+      return
+    }
+
     try {
-      updateLinks(linkForm)
-      setEditingLinks(false)
-      setLinkError(null)
+      await deleteLink(linkId)
+      toast.success('Link deleted successfully')
     } catch (error) {
-      setLinkError(error.message)
+      toast.error(error.message || 'Failed to delete link')
     }
   }
 
-  const handleCancelEdit = () => {
-    setLinkForm(links)
-    setEditingLinks(false)
-    setLinkError(null)
+  // Save link (create or update)
+  const handleSaveLink = async () => {
+    // Validate URL
+    if (!linkForm.url) {
+      toast.error('URL is required')
+      return
+    }
+
+    const validation = validateUrl(linkForm.url)
+    if (!validation.isValid) {
+      toast.error(validation.error || 'Invalid URL')
+      return
+    }
+
+    // Validate label for custom type
+    if (linkForm.type === 'custom' && !linkForm.label?.trim()) {
+      toast.error('Label is required for custom links')
+      return
+    }
+
+    setSaving(true)
+    try {
+      const linkData = {
+        type: linkForm.type,
+        url: validation.normalizedUrl,
+        label: linkForm.type === 'custom' ? linkForm.label.trim() : null,
+      }
+
+      if (editingLink) {
+        // Update existing link
+        await updateLink(editingLink.id, linkData)
+        toast.success('Link updated successfully')
+      } else {
+        // Create new link
+        await createLink(linkData)
+        toast.success('Link added successfully')
+      }
+
+      setShowLinkModal(false)
+      setLinkForm({ type: 'linkedin', label: '', url: '' })
+      setUrlValidation({ isValid: null, error: null })
+    } catch (error) {
+      const errorMessage = error.message || 'Failed to save link'
+      toast.error(errorMessage)
+    } finally {
+      setSaving(false)
+    }
   }
 
-  const handleEditLinks = () => {
-    setLinkForm(links)
-    setEditingLinks(true)
+  // Close modal
+  const handleCloseModal = () => {
+    setShowLinkModal(false)
+    setEditingLink(null)
+    setLinkForm({ type: 'linkedin', label: '', url: '' })
+    setUrlValidation({ isValid: null, error: null })
   }
 
-  const formatUrl = (url) => {
+  // Get icon for platform type
+  const getPlatformIcon = (type) => {
+    const option = PLATFORM_OPTIONS.find(opt => opt.value === type)
+    return option ? option.icon : IconLink
+  }
+
+  // Truncate URL for display
+  const truncateUrl = (url, maxLength = 40) => {
     if (!url) return ''
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return url
+    if (url.length <= maxLength) return url
+    try {
+      const urlObj = new URL(url)
+      const domain = urlObj.hostname
+      const path = urlObj.pathname
+      if (domain.length + path.length <= maxLength) {
+        return `${domain}${path}`
+      }
+      return `${domain}${path.substring(0, maxLength - domain.length - 3)}...`
+    } catch {
+      return url.length > maxLength ? `${url.substring(0, maxLength - 3)}...` : url
     }
-    return `https://${url}`
   }
 
   return (
@@ -171,229 +285,152 @@ function Settings() {
               <IconLink />
             </div>
             <div>
-              <h2 className="content-card-title">Profile Links</h2>
+              <h2 className="content-card-title">Social Media & External Links</h2>
               <p className="content-card-subtitle">Add your professional links</p>
             </div>
           </div>
-          {!editingLinks && (
-            <button
-              type="button"
-              className="settings-edit-btn"
-              onClick={handleEditLinks}
-            >
-              <IconEdit />
-              <span>Edit</span>
-            </button>
-          )}
+          <button
+            type="button"
+            className="settings-edit-btn"
+            onClick={handleAddLink}
+            disabled={linksLoading || isGuest}
+          >
+            <IconPlus />
+            <span>Add Link</span>
+          </button>
         </div>
         <div className="settings-content">
-          {linkError && (
-            <div className="settings-error">{linkError}</div>
-          )}
-          <div className="profile-links-form">
-            <div className="profile-link-field">
-              <label className="profile-link-label">
-                <IconLinkedIn />
-                <span>LinkedIn</span>
-              </label>
-              {editingLinks ? (
-                <input
-                  type="text"
-                  value={linkForm.linkedin}
-                  onChange={(e) => handleLinkChange('linkedin', e.target.value)}
-                  placeholder="linkedin.com/in/yourprofile"
-                  className="profile-link-input"
-                />
-              ) : (
-                <div className="profile-link-display">
-                  {links.linkedin ? (
-                    <a 
-                      href={formatUrl(links.linkedin)} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="profile-link-value"
-                    >
-                      {links.linkedin}
-                    </a>
-                  ) : (
-                    <span className="profile-link-empty">Not set</span>
-                  )}
-                </div>
-              )}
+          {linksLoading ? (
+            <div style={{ padding: '2rem', textAlign: 'center', color: '#94a3b8' }}>
+              Loading links...
             </div>
-
-            <div className="profile-link-field">
-              <label className="profile-link-label">
-                <IconGlobe />
-                <span>Portfolio</span>
-              </label>
-              {editingLinks ? (
-                <input
-                  type="text"
-                  value={linkForm.portfolio}
-                  onChange={(e) => handleLinkChange('portfolio', e.target.value)}
-                  placeholder="yourportfolio.com"
-                  className="profile-link-input"
-                />
-              ) : (
-                <div className="profile-link-display">
-                  {links.portfolio ? (
-                    <a 
-                      href={formatUrl(links.portfolio)} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="profile-link-value"
-                    >
-                      {links.portfolio}
-                    </a>
-                  ) : (
-                    <span className="profile-link-empty">Not set</span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="profile-link-field">
-              <label className="profile-link-label">
-                <IconLink />
-                <span>Indeed</span>
-              </label>
-              {editingLinks ? (
-                <input
-                  type="text"
-                  value={linkForm.indeed}
-                  onChange={(e) => handleLinkChange('indeed', e.target.value)}
-                  placeholder="profile.indeed.com/..."
-                  className="profile-link-input"
-                />
-              ) : (
-                <div className="profile-link-display">
-                  {links.indeed ? (
-                    <a 
-                      href={formatUrl(links.indeed)} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="profile-link-value"
-                    >
-                      {links.indeed}
-                    </a>
-                  ) : (
-                    <span className="profile-link-empty">Not set</span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="profile-link-field">
-              <label className="profile-link-label">
-                <IconGithub />
-                <span>GitHub</span>
-              </label>
-              {editingLinks ? (
-                <input
-                  type="text"
-                  value={linkForm.github}
-                  onChange={(e) => handleLinkChange('github', e.target.value)}
-                  placeholder="github.com/username"
-                  className="profile-link-input"
-                />
-              ) : (
-                <div className="profile-link-display">
-                  {links.github ? (
-                    <a 
-                      href={formatUrl(links.github)} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="profile-link-value"
-                    >
-                      {links.github}
-                    </a>
-                  ) : (
-                    <span className="profile-link-empty">Not set</span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="profile-link-field">
-              <label className="profile-link-label">
-                <IconGlobe />
-                <span>Website</span>
-              </label>
-              {editingLinks ? (
-                <input
-                  type="text"
-                  value={linkForm.website}
-                  onChange={(e) => handleLinkChange('website', e.target.value)}
-                  placeholder="yourwebsite.com"
-                  className="profile-link-input"
-                />
-              ) : (
-                <div className="profile-link-display">
-                  {links.website ? (
-                    <a 
-                      href={formatUrl(links.website)} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="profile-link-value"
-                    >
-                      {links.website}
-                    </a>
-                  ) : (
-                    <span className="profile-link-empty">Not set</span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="profile-link-field">
-              <label className="profile-link-label">
-                <IconLink />
-                <span>Other</span>
-              </label>
-              {editingLinks ? (
-                <input
-                  type="text"
-                  value={linkForm.other}
-                  onChange={(e) => handleLinkChange('other', e.target.value)}
-                  placeholder="Any other platform link"
-                  className="profile-link-input"
-                />
-              ) : (
-                <div className="profile-link-display">
-                  {links.other ? (
-                    <a 
-                      href={formatUrl(links.other)} 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      className="profile-link-value"
-                    >
-                      {links.other}
-                    </a>
-                  ) : (
-                    <span className="profile-link-empty">Not set</span>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {editingLinks && (
-            <div className="profile-links-actions">
+          ) : links.length === 0 ? (
+            <div style={{ padding: '2rem', textAlign: 'center' }}>
+              <p style={{ color: '#94a3b8', marginBottom: '1rem' }}>No links added yet</p>
               <button
                 type="button"
-                className="profile-links-save-btn"
-                onClick={handleSaveLinks}
+                onClick={handleAddLink}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  background: '#3b82f6',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '0.5rem',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                  fontWeight: '500',
+                }}
               >
-                Save Changes
+                <IconPlus style={{ display: 'inline', marginRight: '0.5rem', verticalAlign: 'middle' }} />
+                Add Your First Link
               </button>
-              <button
-                type="button"
-                className="profile-links-cancel-btn"
-                onClick={handleCancelEdit}
-              >
-                Cancel
-              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {links.map((link) => {
+                const PlatformIcon = getPlatformIcon(link.type)
+                return (
+                  <div
+                    key={link.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '1rem',
+                      padding: '1rem',
+                      background: 'rgba(255, 255, 255, 0.02)',
+                      border: '1px solid #334155',
+                      borderRadius: '0.75rem',
+                      transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.02)'
+                    }}
+                  >
+                    <div style={{ flexShrink: 0, color: '#60a5fa' }}>
+                      <PlatformIcon />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: '500', color: '#e2e8f0', marginBottom: '0.25rem' }}>
+                        {link.type === 'custom' ? link.label : PLATFORM_OPTIONS.find(opt => opt.value === link.type)?.label || link.type}
+                      </div>
+                      <a
+                        href={link.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          color: '#60a5fa',
+                          textDecoration: 'none',
+                          fontSize: '0.875rem',
+                          display: 'block',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                        title={link.url}
+                      >
+                        {truncateUrl(link.url)}
+                      </a>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        onClick={() => handleEditLink(link)}
+                        style={{
+                          padding: '0.5rem',
+                          background: 'transparent',
+                          border: '1px solid #475569',
+                          borderRadius: '0.375rem',
+                          color: '#94a3b8',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          transition: 'all 0.2s',
+                        }}
+                        title="Edit link"
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = '#60a5fa'
+                          e.currentTarget.style.color = '#60a5fa'
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = '#475569'
+                          e.currentTarget.style.color = '#94a3b8'
+                        }}
+                      >
+                        <IconEdit />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteLink(link.id)}
+                        style={{
+                          padding: '0.5rem',
+                          background: 'transparent',
+                          border: '1px solid #475569',
+                          borderRadius: '0.375rem',
+                          color: '#94a3b8',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          transition: 'all 0.2s',
+                        }}
+                        title="Delete link"
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = '#ef4444'
+                          e.currentTarget.style.color = '#ef4444'
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = '#475569'
+                          e.currentTarget.style.color = '#94a3b8'
+                        }}
+                      >
+                        <IconTrash />
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
@@ -445,6 +482,196 @@ function Settings() {
           </button>
         </div>
       </div>
+
+      {/* Link Modal */}
+      {showLinkModal && createPortal(
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.7)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '1rem',
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              handleCloseModal()
+            }
+          }}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: '1rem',
+              padding: '2rem',
+              maxWidth: '500px',
+              width: '100%',
+              maxHeight: '90vh',
+              overflow: 'auto',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+              <h2 style={{ margin: 0, color: '#e2e8f0', fontSize: '1.5rem', fontWeight: '600' }}>
+                {editingLink ? 'Edit Link' : 'Add New Link'}
+              </h2>
+              <button
+                type="button"
+                onClick={handleCloseModal}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#94a3b8',
+                  cursor: 'pointer',
+                  padding: '0.5rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+                aria-label="Close modal"
+              >
+                <IconX />
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {/* Platform Type */}
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', color: '#e2e8f0', fontSize: '0.875rem', fontWeight: '500' }}>
+                  Platform
+                </label>
+                <select
+                  value={linkForm.type}
+                  onChange={(e) => setLinkForm(prev => ({ ...prev, type: e.target.value, label: e.target.value === 'custom' ? prev.label : '' }))}
+                  style={{
+                    width: '100%',
+                    padding: '0.75rem',
+                    background: 'rgba(255, 255, 255, 0.03)',
+                    border: '1px solid #334155',
+                    borderRadius: '0.5rem',
+                    color: '#e2e8f0',
+                    fontSize: '0.875rem',
+                    cursor: 'pointer',
+                  }}
+                  disabled={saving}
+                >
+                  {PLATFORM_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Custom Label (only for custom type) */}
+              {linkForm.type === 'custom' && (
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.5rem', color: '#e2e8f0', fontSize: '0.875rem', fontWeight: '500' }}>
+                    Label <span style={{ color: '#ef4444' }}>*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={linkForm.label}
+                    onChange={(e) => setLinkForm(prev => ({ ...prev, label: e.target.value }))}
+                    placeholder="e.g., Personal Blog, Twitter, etc."
+                    style={{
+                      width: '100%',
+                      padding: '0.75rem',
+                      background: 'rgba(255, 255, 255, 0.03)',
+                      border: '1px solid #334155',
+                      borderRadius: '0.5rem',
+                      color: '#e2e8f0',
+                      fontSize: '0.875rem',
+                    }}
+                    disabled={saving}
+                  />
+                </div>
+              )}
+
+              {/* URL Input */}
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', color: '#e2e8f0', fontSize: '0.875rem', fontWeight: '500' }}>
+                  URL <span style={{ color: '#ef4444' }}>*</span>
+                </label>
+                <input
+                  type="text"
+                  value={linkForm.url}
+                  onChange={(e) => setLinkForm(prev => ({ ...prev, url: e.target.value }))}
+                  placeholder={linkForm.type === 'linkedin' ? 'linkedin.com/in/yourprofile' : linkForm.type === 'github' ? 'github.com/username' : 'example.com'}
+                  style={{
+                    width: '100%',
+                    padding: '0.75rem',
+                    background: 'rgba(255, 255, 255, 0.03)',
+                    border: `1px solid ${urlValidation.isValid === false ? '#ef4444' : urlValidation.isValid === true ? '#10b981' : '#334155'}`,
+                    borderRadius: '0.5rem',
+                    color: '#e2e8f0',
+                    fontSize: '0.875rem',
+                  }}
+                  disabled={saving}
+                />
+                {/* Real-time validation feedback */}
+                {linkForm.url && (
+                  <div style={{ marginTop: '0.5rem', fontSize: '0.75rem' }}>
+                    {urlValidation.isValid === true && (
+                      <span style={{ color: '#10b981' }}>✓ Valid URL</span>
+                    )}
+                    {urlValidation.isValid === false && (
+                      <span style={{ color: '#ef4444' }}>{urlValidation.error}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={handleCloseModal}
+                  disabled={saving}
+                  style={{
+                    padding: '0.75rem 1.5rem',
+                    background: 'transparent',
+                    border: '1px solid #475569',
+                    borderRadius: '0.5rem',
+                    color: '#94a3b8',
+                    cursor: saving ? 'not-allowed' : 'pointer',
+                    fontSize: '0.875rem',
+                    fontWeight: '500',
+                    opacity: saving ? 0.5 : 1,
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveLink}
+                  disabled={saving || !urlValidation.isValid || (linkForm.type === 'custom' && !linkForm.label?.trim())}
+                  style={{
+                    padding: '0.75rem 1.5rem',
+                    background: saving || !urlValidation.isValid || (linkForm.type === 'custom' && !linkForm.label?.trim()) ? '#475569' : '#3b82f6',
+                    border: 'none',
+                    borderRadius: '0.5rem',
+                    color: 'white',
+                    cursor: saving || !urlValidation.isValid || (linkForm.type === 'custom' && !linkForm.label?.trim()) ? 'not-allowed' : 'pointer',
+                    fontSize: '0.875rem',
+                    fontWeight: '500',
+                    opacity: saving || !urlValidation.isValid || (linkForm.type === 'custom' && !linkForm.label?.trim()) ? 0.5 : 1,
+                  }}
+                >
+                  {saving ? 'Saving...' : editingLink ? 'Update Link' : 'Add Link'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   )
 }

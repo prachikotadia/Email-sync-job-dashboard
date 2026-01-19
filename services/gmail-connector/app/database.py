@@ -26,6 +26,19 @@ class ApplicationCategory(enum.Enum):
     OFFER_ACCEPTED = "OFFER_ACCEPTED"
     GHOSTED = "GHOSTED"
 
+# Profile Link Type ENUM
+class ProfileLinkType(enum.Enum):
+    LINKEDIN = "linkedin"
+    GITHUB = "github"
+    PORTFOLIO = "portfolio"
+    CUSTOM = "custom"
+
+class ProfileLinkType(enum.Enum):
+    LINKEDIN = "linkedin"
+    GITHUB = "github"
+    PORTFOLIO = "portfolio"
+    CUSTOM = "custom"
+
 class User(Base):
     __tablename__ = "users"
     
@@ -37,6 +50,8 @@ class User(Base):
     applications = relationship("Application", back_populates="user", cascade="all, delete-orphan")
     sync_state = relationship("SyncState", back_populates="user", uselist=False, cascade="all, delete-orphan")
     oauth_tokens = relationship("OAuthToken", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    profile_links = relationship("ProfileLink", back_populates="user", cascade="all, delete-orphan")
+    profile_links = relationship("ProfileLink", back_populates="user", cascade="all, delete-orphan")
 
 class OAuthToken(Base):
     __tablename__ = "oauth_tokens"
@@ -64,16 +79,21 @@ class Application(Base):
     gmail_message_id = Column(Text, unique=True, index=True, nullable=False)
     gmail_thread_id = Column(Text, nullable=False, index=True)  # NOT NULL
     gmail_web_url = Column(Text, nullable=False)  # NOT NULL
-    company_name = Column(Text, nullable=False, index=True)  # Must never be null
+    company_name = Column(Text, nullable=False, index=True)  # Must never be null - canonical normalized name
+    company_slug = Column(String, index=True)  # Lowercase, normalized slug for URL routing and deduplication
     company_domain = Column(Text, index=True)  # Company domain for normalization
-    role = Column(String)
+    company_aliases = Column(JSON, nullable=True)  # Array of company aliases (e.g., ["Facebook", "Meta Platforms"] for "Meta")
+    role = Column(String)  # role_title equivalent
+    application_name = Column(Text)  # Derived from email subject + company + role for search
     category = Column(String, nullable=False, index=True)  # APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED (uppercase)
     subject = Column(Text, nullable=False)  # NOT NULL
     snippet = Column(Text)
     from_email = Column(String)
-    received_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    received_at = Column(DateTime(timezone=True), nullable=False, index=True)  # applied_at equivalent
+    last_activity_at = Column(DateTime(timezone=True), index=True)  # Last activity timestamp (updates on status change)
     last_updated = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    # source_email_permalink: Use gmail_web_url field (already exists)
     
     # Relationships
     user = relationship("User", back_populates="applications")
@@ -92,15 +112,50 @@ class SyncState(Base):
     # Relationships
     user = relationship("User", back_populates="sync_state")
 
+class ProfileLink(Base):
+    __tablename__ = "profile_links"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    type = Column(SQLEnum(ProfileLinkType, name="profile_link_type"), nullable=False, index=True)
+    label = Column(String, nullable=True)  # Required for CUSTOM type, null for others
+    url = Column(Text, nullable=False)  # Normalized URL with scheme (https://...)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+    
+    # Relationships
+    user = relationship("User", back_populates="profile_links")
+
 class SyncJobStatus(enum.Enum):
     PENDING = "PENDING"
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"  # Cancellation requested by user
+    CANCELED = "CANCELED"  # Cancellation completed
     COMPLETED = "COMPLETED"
     DONE = "DONE"
     FAILED = "FAILED"
     UNAVAILABLE = "UNAVAILABLE"
     NOT_FOUND = "NOT_FOUND"
+
+class SyncStateEnum(enum.Enum):
+    """
+    Formal sync state model for retry + resume support.
+    
+    Rules:
+    - Only ONE active sync per user (states != IDLE and != COMPLETED and != FAILED_FATAL)
+    - State must persist in DB
+    - On crash → resume from last state
+    """
+    IDLE = "IDLE"                          # No active sync (initial/default state)
+    QUEUED = "QUEUED"                      # Job queued, waiting for worker
+    FETCHING_HEADERS = "FETCHING_HEADERS"  # Fetching message headers/list (pagination)
+    FETCHING_BODIES = "FETCHING_BODIES"    # Fetching full message bodies
+    CLASSIFYING = "CLASSIFYING"            # Classifying emails (rule-based + LLM)
+    PERSISTING = "PERSISTING"              # Saving to database
+    COMPLETED = "COMPLETED"                # Sync completed successfully
+    FAILED_RETRYABLE = "FAILED_RETRYABLE"  # Failed but can retry (rate limits, network)
+    FAILED_FATAL = "FAILED_FATAL"          # Failed permanently (auth revoked, invalid data)
 
 class SyncJob(Base):
     __tablename__ = "sync_jobs"
@@ -113,6 +168,8 @@ class SyncJob(Base):
     processed_failed = Column(Integer, default=0)
     started_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     finished_at = Column(DateTime(timezone=True), nullable=True)  # When job completed/failed
+    canceled_at = Column(DateTime(timezone=True), nullable=True)  # When job was canceled
+    cancel_reason = Column(Text, nullable=True)  # Reason for cancellation (e.g., "Canceled by user")
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     error_message = Column(Text, nullable=True)  # last_error_message
     error_code = Column(String, nullable=True)  # last_error_code (e.g., "REAUTH_REQUIRED", "RATE_LIMIT", etc.)
@@ -120,8 +177,9 @@ class SyncJob(Base):
     logs = Column(JSON, default=list)  # Store log entries as JSON array
     email_entries = Column(JSON, default=list)  # Store email entries as JSON array
     checkpoint = Column(JSON, nullable=True)  # Store pagination token, lastMessageInternalDate, etc.
-    current_phase = Column(String, nullable=True)  # e.g., "fetching_ids", "processing_messages", "completed"
+    current_phase = Column(String, nullable=True)  # Legacy: progress phase for SSE events
     current_page = Column(Integer, default=0)  # Current pagination page
+    sync_state = Column(SQLEnum(SyncStateEnum), nullable=False, default=SyncStateEnum.IDLE, index=True)  # Formal sync state for retry/resume
     
     # Progress event persistence
     last_event_json = Column(JSON, nullable=True)  # Last progress event for SSE reconnection
@@ -141,27 +199,68 @@ class SyncJob(Base):
     rate_emails_per_sec = Column(Integer, default=0)
     rate_bytes_per_sec = Column(Integer, default=0)
     
+    # Sync range: 3M, 6M, 12M, 16M, FULL
+    sync_range = Column(String, nullable=True, index=True)  # Store range as string: "3M", "6M", "12M", "16M", "FULL"
+    
     # Relationships
     user = relationship("User")
 
 def init_db():
     """Initialize database tables with schema migration support"""
     try:
+        # Enable pg_trgm extension for fuzzy search (if not already enabled)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+                logger.info("pg_trgm extension enabled for fuzzy search")
+        except Exception as e:
+            # Extension might already exist or user might not have permission
+            logger.warning(f"Could not enable pg_trgm extension: {e}")
+        
         # Refresh inspector first to check existing tables
         inspector = inspect(engine)
         tables = inspector.get_table_names()
         
         # Migrate sync_jobs table FIRST (before creating tables) if it exists
         # This must run before any queries to avoid "column does not exist" errors
+        # Migrate enum values for SyncJobStatus (add CANCEL_REQUESTED and CANCELED if missing)
+        try:
+            with engine.begin() as conn:
+                # Check existing enum values
+                result = conn.execute(text("SELECT unnest(enum_range(NULL::syncjobstatus))::text"))
+                existing_enum_values = {row[0] for row in result}
+                
+                # Add CANCEL_REQUESTED if missing
+                if 'CANCEL_REQUESTED' not in existing_enum_values:
+                    try:
+                        conn.execute(text("ALTER TYPE syncjobstatus ADD VALUE IF NOT EXISTS 'CANCEL_REQUESTED'"))
+                        logger.info("Added CANCEL_REQUESTED to syncjobstatus enum")
+                    except Exception as e:
+                        # IF NOT EXISTS might not be supported in older PostgreSQL versions
+                        # Try without it, ignore if already exists
+                        if 'already exists' not in str(e).lower():
+                            logger.warning(f"Could not add CANCEL_REQUESTED to enum: {e}")
+                
+                # Add CANCELED if missing
+                if 'CANCELED' not in existing_enum_values:
+                    try:
+                        conn.execute(text("ALTER TYPE syncjobstatus ADD VALUE IF NOT EXISTS 'CANCELED'"))
+                        logger.info("Added CANCELED to syncjobstatus enum")
+                    except Exception as e:
+                        if 'already exists' not in str(e).lower():
+                            logger.warning(f"Could not add CANCELED to enum: {e}")
+        except Exception as e:
+            logger.warning(f"Could not migrate enum values: {e}")
+        
         if 'sync_jobs' in tables:
             existing_columns = {col['name'] for col in inspector.get_columns('sync_jobs')}
             required_columns = {
                 'processed_failed', 'error_code', 'checkpoint', 
-                'finished_at', 'current_phase', 'current_page',
+                'finished_at', 'canceled_at', 'cancel_reason', 'current_phase', 'current_page',
                 'last_event_json', 'last_heartbeat_at', 'error_json',
                 'counts_listed', 'counts_fetched', 'counts_parsed',
                 'counts_classified', 'counts_saved', 'counts_skipped', 'counts_failed',
-                'rate_emails_per_sec', 'rate_bytes_per_sec'
+                'rate_emails_per_sec', 'rate_bytes_per_sec', 'sync_state', 'sync_range'
             }
             missing_columns = required_columns - existing_columns
             
@@ -177,6 +276,10 @@ def init_db():
                         conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS checkpoint JSON"))
                     if 'finished_at' in missing_columns:
                         conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP WITH TIME ZONE"))
+                    if 'canceled_at' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS canceled_at TIMESTAMP WITH TIME ZONE"))
+                    if 'cancel_reason' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS cancel_reason TEXT"))
                     if 'current_phase' in missing_columns:
                         conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS current_phase VARCHAR"))
                     if 'current_page' in missing_columns:
@@ -208,7 +311,125 @@ def init_db():
                         conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS rate_emails_per_sec INTEGER DEFAULT 0"))
                     if 'rate_bytes_per_sec' in missing_columns:
                         conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS rate_bytes_per_sec INTEGER DEFAULT 0"))
+                    # Sync state column (formal state model for retry/resume)
+                    if 'sync_state' in missing_columns:
+                        # Create enum type if it doesn't exist
+                        conn.execute(text("""
+                            DO $$ BEGIN
+                                CREATE TYPE syncstateenum AS ENUM (
+                                    'IDLE', 'QUEUED', 'FETCHING_HEADERS', 'FETCHING_BODIES',
+                                    'CLASSIFYING', 'PERSISTING', 'COMPLETED', 'FAILED_RETRYABLE', 'FAILED_FATAL'
+                                );
+                            EXCEPTION
+                                WHEN duplicate_object THEN null;
+                            END $$;
+                        """))
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS sync_state syncstateenum DEFAULT 'IDLE'"))
+                    # Sync range column (3M, 6M, 12M, 16M, FULL)
+                    if 'sync_range' in missing_columns:
+                        conn.execute(text("ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS sync_range VARCHAR"))
                 logger.info("sync_jobs table migration completed")
+        
+        # Migrate applications table - add new columns if missing
+        if 'applications' in tables:
+            existing_app_columns = {col['name'] for col in inspector.get_columns('applications')}
+            missing_columns = []
+            
+            if 'company_aliases' not in existing_app_columns:
+                missing_columns.append(('company_aliases', 'JSON'))
+            if 'company_slug' not in existing_app_columns:
+                missing_columns.append(('company_slug', 'VARCHAR'))
+            if 'application_name' not in existing_app_columns:
+                missing_columns.append(('application_name', 'TEXT'))
+            if 'last_activity_at' not in existing_app_columns:
+                missing_columns.append(('last_activity_at', 'TIMESTAMP WITH TIME ZONE'))
+            
+            if missing_columns:
+                try:
+                    with engine.begin() as conn:
+                        for col_name, col_type in missing_columns:
+                            conn.execute(text(f"ALTER TABLE applications ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                        logger.info(f"Added columns to applications table: {[c[0] for c in missing_columns]}")
+                except Exception as e:
+                    logger.warning(f"Could not add columns to applications table: {e}")
+        
+        # Create search indexes for applications table (for fuzzy search)
+        if 'applications' in tables:
+            try:
+                with engine.begin() as conn:
+                    # Check if search index exists
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_search'
+                    """))
+                    if not result.fetchone():
+                        # Create GIN index for full-text search using tsvector
+                        conn.execute(text("""
+                            CREATE INDEX idx_applications_search
+                            ON applications
+                            USING GIN (
+                                to_tsvector(
+                                    'english',
+                                    coalesce(company_name, '') || ' ' ||
+                                    coalesce(role, '') || ' ' ||
+                                    coalesce(subject, '')
+                                )
+                            )
+                        """))
+                        logger.info("Created full-text search index on applications")
+                    
+                    # Create GIN index for trigram (fuzzy) search on company_name
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_company_trgm'
+                    """))
+                    if not result.fetchone():
+                        conn.execute(text("""
+                            CREATE INDEX idx_applications_company_trgm
+                            ON applications
+                            USING GIN (company_name gin_trgm_ops)
+                        """))
+                        logger.info("Created trigram index for fuzzy company search")
+                    
+                    # Create combined index for (status, received_at) for filter performance
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_category_received_at'
+                    """))
+                    if not result.fetchone():
+                        conn.execute(text("""
+                            CREATE INDEX idx_applications_category_received_at
+                            ON applications (category, received_at DESC)
+                        """))
+                        logger.info("Created combined index for category and received_at")
+                    
+                    # Create index on company_slug if column exists
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_company_slug'
+                    """))
+                    if not result.fetchone():
+                        try:
+                            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_applications_company_slug ON applications (company_slug)"))
+                            logger.info("Created index on company_slug")
+                        except Exception:
+                            # Column might not exist yet, skip
+                            pass
+                    
+                    # Create index on last_activity_at if column exists
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_last_activity_at'
+                    """))
+                    if not result.fetchone():
+                        try:
+                            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_applications_last_activity_at ON applications (last_activity_at DESC)"))
+                            logger.info("Created index on last_activity_at")
+                        except Exception:
+                            # Column might not exist yet, skip
+                            pass
+            except Exception as e:
+                logger.warning(f"Could not create search indexes: {e}")
         
         # Now create all tables (this will create new tables but won't modify existing ones)
         # This must come AFTER migration to avoid column errors

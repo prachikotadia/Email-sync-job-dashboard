@@ -1,5 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional, List
 import httpx
 import os
 import logging
@@ -9,6 +11,10 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 GMAIL_SERVICE_URL = os.getenv("GMAIL_SERVICE_URL", "http://gmail-connector-service:8002")
+
+class SyncRequest(BaseModel):
+    mode: Optional[str] = "full_history"  # "full_history" or "time_range"
+    time_range_months: Optional[int] = None  # For time_range mode: 3, 6, or 12
 
 @router.get("/status")
 async def get_status(token_data: dict = Depends(verify_token)):
@@ -37,10 +43,14 @@ async def get_status(token_data: dict = Depends(verify_token)):
         raise HTTPException(status_code=503, detail="Gmail service unavailable")
 
 @router.post("/sync")
-async def start_sync(token_data: dict = Depends(verify_token)):
+async def start_sync(
+    request: Optional[SyncRequest] = Body(None),
+    token_data: dict = Depends(verify_token)
+):
     """
     Start Gmail sync
-    Returns sync_id and status
+    Supports Mode A (Full History) and Mode B (Time Range)
+    Returns sync_id and status immediately - sync runs in background
     Contract: { "sync_id": "uuid", "status": "started" }
     """
     user_id = token_data.get("sub")
@@ -49,8 +59,19 @@ async def start_sync(token_data: dict = Depends(verify_token)):
     if not user_email:
         raise HTTPException(status_code=400, detail="User email not found in token")
     
+    # Prepare request body with mode support
+    request_body = {
+        "user_id": user_id,
+        "user_email": user_email
+    }
+    
+    if request:
+        request_body["mode"] = request.mode or "full_history"
+        if request.time_range_months:
+            request_body["time_range_months"] = request.time_range_months
+    
     url = f"{GMAIL_SERVICE_URL}/sync/start"
-    logger.info(f"API Gateway: Calling Gmail service at {url} for user {user_email}")
+    logger.info(f"API Gateway: Calling Gmail service at {url} for user {user_email}, mode={request_body.get('mode')}")
     
     try:
         # Reduced timeout since /sync/start should return immediately (sync runs in background)
@@ -58,7 +79,7 @@ async def start_sync(token_data: dict = Depends(verify_token)):
             try:
                 response = await client.post(
                     url,
-                    json={"user_id": user_id, "user_email": user_email},
+                    json=request_body,
                     follow_redirects=True
                 )
             except httpx.ConnectError as conn_err:
@@ -221,16 +242,45 @@ async def get_sync_progress(job_id: str, token_data: dict = Depends(verify_token
     """
     return await get_sync_status(sync_id=job_id, token_data=token_data)
 
+@router.post("/sync/stop/{sync_id}")
+async def stop_sync(sync_id: str, token_data: dict = Depends(verify_token)):
+    """
+    Cancel/stop a running sync job.
+    Returns immediately after setting CANCEL_REQUESTED status.
+    Worker will detect cancellation and stop mid-sync.
+    """
+    user_id = token_data.get("sub")
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{GMAIL_SERVICE_URL}/sync/stop/{sync_id}",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Sync job not found")
+        elif e.response.status_code == 403:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Failed to cancel sync: {str(e)}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
 @router.get("/applications")
 async def get_applications(
     search: str = Query(None),
     status: str = Query(None),
+    company: Optional[str] = Query(None, description="Filter by company name"),
     token_data: dict = Depends(verify_token)
 ):
     """
-    Get all applications
+    Get all applications (flat list)
     NO pagination limits - returns ALL fetched emails
     Response includes gmail_web_url for opening emails
+    
+    Supports filtering by company name.
     """
     user_id = token_data.get("sub")
     
@@ -240,11 +290,181 @@ async def get_applications(
             params["search"] = search
         if status:
             params["status"] = status
+        if company:
+            params["company"] = company
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 f"{GMAIL_SERVICE_URL}/applications",
                 params=params
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+
+@router.get("/applications/company/{company_name}")
+async def get_company_applications(
+    company_name: str,
+    search: Optional[str] = Query(None),
+    status: Optional[List[str]] = Query(None),
+    sort_by: str = Query("received_at"),
+    sort_order: str = Query("desc"),
+    cursor: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+    token_data: dict = Depends(verify_token)
+):
+    """
+    Get applications for a specific company.
+    Supports search, filters, sorting, and cursor-based pagination.
+    """
+    user_id = token_data.get("sub")
+    
+    try:
+        query_params = [("user_id", user_id)]
+        if search:
+            query_params.append(("search", search))
+        if status:
+            for s in status:
+                query_params.append(("status", s))
+        query_params.append(("sort_by", sort_by))
+        query_params.append(("sort_order", sort_order))
+        if cursor:
+            query_params.append(("cursor", cursor))
+        query_params.append(("limit", str(limit)))
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/applications/company/{company_name}",
+                params=query_params
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+
+@router.get("/applications/grouped-by-company")
+async def get_applications_grouped_by_company(
+    token_data: dict = Depends(verify_token)
+):
+    """
+    Get applications grouped by company (summary only).
+    
+    Returns company summary with:
+    - company_name
+    - total_applications
+    - status breakdown
+    - latest_applied_at
+    """
+    user_id = token_data.get("sub")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/applications/grouped-by-company",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+
+@router.get("/search")
+async def search(
+    q: str = Query(..., description="Search query"),
+    limit: int = Query(50, ge=1, le=100, description="Max results per page"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    fuzzy: bool = Query(False, description="Enable fuzzy/typo-tolerant search"),
+    token_data: dict = Depends(verify_token)
+):
+    """
+    Production-grade global search endpoint.
+    
+    Searches across company name, role, subject, and status.
+    Returns ranked, paginated results.
+    """
+    user_id = token_data.get("sub")
+    
+    try:
+        params = {
+            "user_id": user_id,
+            "q": q,
+            "limit": limit,
+            "offset": offset
+        }
+        if fuzzy:
+            params["fuzzy"] = "true"
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/search",
+                params=params
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+
+@router.get("/applications/search")
+async def search_applications_advanced(
+    q: Optional[str] = Query(None, description="Global search query"),
+    status: Optional[List[str]] = Query(None, description="Status filter (multi-select)"),
+    company: Optional[str] = Query(None, description="Company filter (exact match)"),
+    role: Optional[str] = Query(None, description="Role filter (partial match)"),
+    date_from: Optional[str] = Query(None, description="Start date (ISO format: YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="End date (ISO format: YYYY-MM-DD)"),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(20, ge=1, le=100, description="Results per page"),
+    sort_by: str = Query("received_at", description="Sort field: received_at, company_name, or last_activity_at"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    token_data: dict = Depends(verify_token)
+):
+    """
+    Advanced unified search endpoint with filters, pagination, and sorting.
+    
+    All logic is backend-driven for performance with large datasets.
+    """
+    user_id = token_data.get("sub")
+    
+    try:
+        # Build query params list for httpx (handles multi-value params correctly)
+        query_params = [("user_id", user_id)]
+        
+        if q:
+            query_params.append(("q", q))
+        
+        if status:
+            # Multi-value query param - add each status value
+            for s in status:
+                query_params.append(("status", s))
+        
+        if date_from:
+            query_params.append(("date_from", date_from))
+        
+        if date_to:
+            query_params.append(("date_to", date_to))
+        
+        if company:
+            query_params.append(("company", company))
+        
+        if role:
+            query_params.append(("role", role))
+        
+        query_params.extend([
+            ("page", str(page)),
+            ("page_size", str(page_size)),
+            ("sort_by", sort_by),
+            ("sort_order", sort_order)
+        ])
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/applications/search",
+                params=query_params
             )
             response.raise_for_status()
             return response.json()

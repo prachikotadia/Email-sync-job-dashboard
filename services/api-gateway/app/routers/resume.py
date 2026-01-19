@@ -1,10 +1,10 @@
 """
-Resume Router - Proxies resume requests to resume-service
+Resume Router - Proxies resume file management requests to resume-service
 """
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Request
-from fastapi.responses import Response
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Request, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import httpx
 import os
 from app.middleware.auth_middleware import verify_token
@@ -14,25 +14,8 @@ router = APIRouter()
 RESUME_SERVICE_URL = os.getenv("RESUME_SERVICE_URL", "http://resume-service:8004")
 
 
-class ResumeCreate(BaseModel):
-    title: str
-    summary: Optional[str] = None
-    experience: List[Dict[str, Any]] = []
-    education: List[Dict[str, Any]] = []
-    skills: List[str] = []
-    projects: List[Dict[str, Any]] = []
-    certifications: List[Dict[str, Any]] = []
-
-
-class ResumeUpdate(BaseModel):
-    title: Optional[str] = None
-    summary: Optional[str] = None
-    experience: Optional[List[Dict[str, Any]]] = None
-    education: Optional[List[Dict[str, Any]]] = None
-    skills: Optional[List[str]] = None
-    projects: Optional[List[Dict[str, Any]]] = None
-    certifications: Optional[List[Dict[str, Any]]] = None
-    is_active: Optional[bool] = None
+class ResumeRenameRequest(BaseModel):
+    file_name: str
 
 
 def _get_auth_header(request: Request) -> str:
@@ -43,59 +26,175 @@ def _get_auth_header(request: Request) -> str:
     return auth_header
 
 
-@router.post("/resumes")
-async def create_resume(
-    resume_data: ResumeCreate,
+# Resume Upload
+@router.post("/upload")
+async def upload_resume(
     request: Request,
+    file: UploadFile = File(...),
+    file_name: Optional[str] = Query(None),
     token_data: dict = Depends(verify_token)
 ):
-    """Create a new resume"""
+    """Upload a resume file (PDF or DOCX)"""
     auth_header = _get_auth_header(request)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{RESUME_SERVICE_URL}/resumes",
-                json=resume_data.dict(),
-                headers={"Authorization": auth_header}
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to create resume")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
-
-
-@router.get("/resumes")
-async def list_resumes(
-    request: Request,
-    is_active: Optional[bool] = None,
-    token_data: dict = Depends(verify_token)
-):
-    """List all resumes for current user"""
-    auth_header = _get_auth_header(request)
-    try:
-        params = {}
-        if is_active is not None:
-            params["is_active"] = is_active
+        # Read file content
+        file_content = await file.read()
         
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                f"{RESUME_SERVICE_URL}/resumes",
+        # Forward to resume service
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = {"file": (file.filename, file_content, file.content_type)}
+            params = {}
+            if file_name:
+                params["file_name"] = file_name
+            
+            response = await client.post(
+                f"{RESUME_SERVICE_URL}/resumes/upload",
+                files=files,
                 params=params,
                 headers={"Authorization": auth_header}
             )
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to list resumes")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
 
 
-@router.get("/resumes/{resume_id}")
+# List Resumes
+@router.get("")
+async def list_resumes(
+    request: Request,
+    token_data: dict = Depends(verify_token)
+):
+    """List all resumes for current user"""
+    auth_header = _get_auth_header(request)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{RESUME_SERVICE_URL}/resumes",
+                headers={"Authorization": auth_header}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
+
+
+# Preview Resume (MUST be before /{resume_id} to avoid route conflict)
+@router.get("/{resume_id}/preview")
+async def preview_resume(
+    resume_id: str,
+    request: Request,
+    token_data: dict = Depends(verify_token)
+):
+    """Preview resume file (opens in browser)"""
+    auth_header = _get_auth_header(request)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/preview",
+                headers={"Authorization": auth_header}
+            )
+            response.raise_for_status()
+            
+            # Stream the file
+            return StreamingResponse(
+                iter([response.content]),
+                media_type=response.headers.get("content-type", "application/pdf"),
+                headers={
+                    "Content-Disposition": response.headers.get("Content-Disposition", f'inline; filename="resume.pdf"')
+                }
+            )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
+
+
+# Download Resume (MUST be before /{resume_id} to avoid route conflict)
+@router.get("/{resume_id}/download")
+async def download_resume(
+    resume_id: str,
+    request: Request,
+    token_data: dict = Depends(verify_token)
+):
+    """Download resume file"""
+    auth_header = _get_auth_header(request)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/download",
+                headers={"Authorization": auth_header}
+            )
+            response.raise_for_status()
+            
+            # Stream the file
+            return StreamingResponse(
+                iter([response.content]),
+                media_type=response.headers.get("content-type", "application/octet-stream"),
+                headers={
+                    "Content-Disposition": response.headers.get("Content-Disposition", f'attachment; filename="resume.pdf"')
+                }
+            )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
+
+
+# Rename Resume (MUST be before /{resume_id} to avoid route conflict)
+@router.put("/{resume_id}/rename")
+async def rename_resume(
+    resume_id: str,
+    request: ResumeRenameRequest,
+    http_request: Request,
+    token_data: dict = Depends(verify_token)
+):
+    """Rename a resume"""
+    auth_header = _get_auth_header(http_request)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.put(
+                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/rename",
+                json=request.dict(),
+                headers={"Authorization": auth_header}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
+
+
+# Set Default Resume (MUST be before /{resume_id} to avoid route conflict)
+@router.post("/{resume_id}/set-default")
+async def set_default_resume(
+    resume_id: str,
+    request: Request,
+    token_data: dict = Depends(verify_token)
+):
+    """Set a resume as default"""
+    auth_header = _get_auth_header(request)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/set-default",
+                headers={"Authorization": auth_header}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
+
+
+# Get Single Resume (MUST be after all /{resume_id}/* routes)
+@router.get("/{resume_id}")
 async def get_resume(
     resume_id: str,
     request: Request,
@@ -104,7 +203,7 @@ async def get_resume(
     """Get a specific resume"""
     auth_header = _get_auth_header(request)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 f"{RESUME_SERVICE_URL}/resumes/{resume_id}",
                 headers={"Authorization": auth_header}
@@ -112,38 +211,13 @@ async def get_resume(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to get resume")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
 
 
-@router.put("/resumes/{resume_id}")
-async def update_resume(
-    resume_id: str,
-    resume_data: ResumeUpdate,
-    request: Request,
-    token_data: dict = Depends(verify_token)
-):
-    """Update a resume"""
-    auth_header = _get_auth_header(request)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.put(
-                f"{RESUME_SERVICE_URL}/resumes/{resume_id}",
-                json=resume_data.dict(exclude_none=True),
-                headers={"Authorization": auth_header}
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to update resume")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
-
-
-@router.delete("/resumes/{resume_id}")
+# Delete Resume
+@router.delete("/{resume_id}")
 async def delete_resume(
     resume_id: str,
     request: Request,
@@ -152,148 +226,83 @@ async def delete_resume(
     """Delete a resume"""
     auth_header = _get_auth_header(request)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.delete(
                 f"{RESUME_SERVICE_URL}/resumes/{resume_id}",
                 headers={"Authorization": auth_header}
             )
             response.raise_for_status()
-            return response.json()
+            return response.status_code == 204
     except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to delete resume")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
 
 
-@router.post("/resumes/upload")
-async def upload_resume(
-    request: Request,
-    file: UploadFile = File(...),
-    token_data: dict = Depends(verify_token)
-):
-    """Upload and parse a resume file"""
-    auth_header = _get_auth_header(request)
-    try:
-        file_content = await file.read()
-        
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            files = {"file": (file.filename, file_content, file.content_type)}
-            response = await client.post(
-                f"{RESUME_SERVICE_URL}/resumes/upload",
-                files=files,
-                headers={"Authorization": auth_header}
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to upload resume")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
-
-
-@router.post("/resumes/{resume_id}/export/pdf")
-async def export_resume_pdf(
-    resume_id: str,
+# Get Default Resume
+@router.get("/default")
+async def get_default_resume(
     request: Request,
     token_data: dict = Depends(verify_token)
 ):
-    """Export resume as PDF"""
+    """Get the default resume for current user"""
     auth_header = _get_auth_header(request)
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/export/pdf",
-                headers={"Authorization": auth_header}
-            )
-            response.raise_for_status()
-            
-            return Response(
-                content=response.content,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": response.headers.get("content-disposition", ""),
-                },
-            )
-    except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to export PDF")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
-
-
-@router.post("/resumes/{resume_id}/export/docx")
-async def export_resume_docx(
-    resume_id: str,
-    request: Request,
-    token_data: dict = Depends(verify_token)
-):
-    """Export resume as DOCX"""
-    auth_header = _get_auth_header(request)
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/export/docx",
-                headers={"Authorization": auth_header}
-            )
-            response.raise_for_status()
-            
-            return Response(
-                content=response.content,
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                headers={
-                    "Content-Disposition": response.headers.get("content-disposition", ""),
-                },
-            )
-    except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to export DOCX")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
-
-
-@router.post("/resumes/{resume_id}/version")
-async def create_version(
-    resume_id: str,
-    request: Request,
-    token_data: dict = Depends(verify_token)
-):
-    """Create a version snapshot of a resume"""
-    auth_header = _get_auth_header(request)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/version",
-                headers={"Authorization": auth_header}
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to create version")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
-
-
-@router.get("/resumes/{resume_id}/versions")
-async def list_versions(
-    resume_id: str,
-    request: Request,
-    token_data: dict = Depends(verify_token)
-):
-    """List all versions of a resume"""
-    auth_header = _get_auth_header(request)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"{RESUME_SERVICE_URL}/resumes/{resume_id}/versions",
+                f"{RESUME_SERVICE_URL}/resumes/default",
                 headers={"Authorization": auth_header}
             )
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as e:
-        error_detail = e.response.json().get("detail", "Failed to list versions")
-        raise HTTPException(status_code=e.response.status_code, detail=error_detail)
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
+
+
+# Link Resume to Application
+@router.post("/applications/{application_id}/resume/{resume_id}")
+async def link_resume_to_application(
+    application_id: str,
+    resume_id: str,
+    request: Request,
+    token_data: dict = Depends(verify_token)
+):
+    """Link a resume to an application"""
+    auth_header = _get_auth_header(request)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{RESUME_SERVICE_URL}/applications/{application_id}/resume/{resume_id}",
+                headers={"Authorization": auth_header}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
+
+
+# Get Resume for Application
+@router.get("/applications/{application_id}/resume")
+async def get_application_resume(
+    application_id: str,
+    request: Request,
+    token_data: dict = Depends(verify_token)
+):
+    """Get the resume linked to an application"""
+    auth_header = _get_auth_header(request)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{RESUME_SERVICE_URL}/applications/{application_id}/resume",
+                headers={"Authorization": auth_header}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.json().get("detail", str(e)))
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Resume service unavailable: {str(e)}")
