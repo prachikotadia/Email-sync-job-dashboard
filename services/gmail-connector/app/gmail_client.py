@@ -368,3 +368,30 @@ class GmailClient:
         except Exception as e:
             logger.error(f"Error getting message count: {e}")
             return 0
+    
+    def get_thread(self, thread_id: str) -> Optional[Dict]:
+        """
+        Get full thread by thread ID.
+        
+        Args:
+            thread_id: Gmail thread ID
+        
+        Returns:
+            Thread dict with all messages, or None if not found
+        """
+        if not self.service:
+            raise Exception("Gmail service not initialized")
+        
+        try:
+            def get_thread():
+                return self.service.users().threads().get(
+                    userId='me',
+                    id=thread_id,
+                    format='full'
+                ).execute()
+            
+            thread = self._retry_with_backoff(get_thread, max_attempts=3)
+            return thread
+        except Exception as e:
+            logger.debug(f"Error getting thread {thread_id}: {e}")
+            return None

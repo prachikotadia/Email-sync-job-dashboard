@@ -59,16 +59,31 @@ async def start_sync(
     if not user_email:
         raise HTTPException(status_code=400, detail="User email not found in token")
     
-    # Prepare request body with mode support
+    # Prepare request body - convert mode/time_range_months to range field
     request_body = {
         "user_id": user_id,
         "user_email": user_email
     }
     
+    # Convert mode/time_range_months to range field (required by gmail-connector service)
     if request:
-        request_body["mode"] = request.mode or "full_history"
-        if request.time_range_months:
-            request_body["time_range_months"] = request.time_range_months
+        mode = request.mode or "full_history"
+        time_range_months = request.time_range_months
+        
+        if mode == "full_history" or not time_range_months:
+            request_body["range"] = "FULL"
+        else:
+            # Validate time_range_months and convert to range format
+            valid_months = [3, 6, 12, 16]
+            if time_range_months not in valid_months:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid time_range_months. Must be one of: {', '.join(map(str, valid_months))}"
+                )
+            request_body["range"] = f"{time_range_months}M"
+    else:
+        # Default to full history if no request body provided
+        request_body["range"] = "FULL"
     
     url = f"{GMAIL_SERVICE_URL}/sync/start"
     logger.info(f"API Gateway: Calling Gmail service at {url} for user {user_email}, mode={request_body.get('mode')}")

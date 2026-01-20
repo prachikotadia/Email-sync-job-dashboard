@@ -56,8 +56,10 @@ const ApplicationRow = memo(({
   onResumesChange,
   isGuest
 }) => {
-  const category = normalizeCategory(app.category)
-  const categoryLabel = getCategoryLabel(app.category)
+  // Use category if available, otherwise fallback to status
+  const categoryValue = app.category || app.status || null
+  const category = normalizeCategory(categoryValue)
+  const categoryLabel = getCategoryLabel(categoryValue)
   const hasGmailLink = app.gmail_deep_link || app.gmail_web_url || app.gmail_message_id
 
   return (

@@ -1,0 +1,9 @@
+# Place your ONNX model files here:
+# - model_quantized.onnx (quantized model for speed + lower RAM)
+# - config.json
+# - tokenizer.json
+# - tokenizer_config.json
+# - vocab.txt
+
+# DO NOT load from Hugging Face URL in production!
+# All model files should be stored locally in this directory.

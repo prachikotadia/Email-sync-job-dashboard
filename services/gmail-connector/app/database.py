@@ -18,13 +18,21 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-# Category ENUM - strict 5 categories, uppercase
+# Category ENUM - strict 6 categories, uppercase (includes WITHDRAWN)
 class ApplicationCategory(enum.Enum):
-    APPLIED = "APPLIED"
+    ACTIVE = "ACTIVE"  # Renamed from APPLIED for clarity
     REJECTED = "REJECTED"
     INTERVIEW = "INTERVIEW"
-    OFFER_ACCEPTED = "OFFER_ACCEPTED"
+    OFFER = "OFFER"  # Renamed from OFFER_ACCEPTED
     GHOSTED = "GHOSTED"
+    WITHDRAWN = "WITHDRAWN"
+
+# Classification source ENUM
+class ClassificationSource(enum.Enum):
+    RULE = "RULE"  # Rule-based classification
+    LLM = "LLM"  # LLM-based classification
+    FILTERED = "FILTERED"  # Filtered out (promotions, etc.)
+    THREAD_CONTEXT = "THREAD_CONTEXT"  # Classified based on thread history
 
 # Profile Link Type ENUM
 class ProfileLinkType(enum.Enum):
@@ -85,7 +93,7 @@ class Application(Base):
     company_aliases = Column(JSON, nullable=True)  # Array of company aliases (e.g., ["Facebook", "Meta Platforms"] for "Meta")
     role = Column(String)  # role_title equivalent
     application_name = Column(Text)  # Derived from email subject + company + role for search
-    category = Column(String, nullable=False, index=True)  # APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED (uppercase)
+    category = Column(String, nullable=False, index=True)  # ACTIVE, REJECTED, INTERVIEW, OFFER, GHOSTED, WITHDRAWN (uppercase)
     subject = Column(Text, nullable=False)  # NOT NULL
     snippet = Column(Text)
     from_email = Column(String)
@@ -95,8 +103,26 @@ class Application(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     # source_email_permalink: Use gmail_web_url field (already exists)
     
+    # Classification traceability fields (NON-NEGOTIABLE)
+    classification_source = Column(String, nullable=True, index=True)  # RULE, LLM, FILTERED, THREAD_CONTEXT
+    rule_name = Column(String, nullable=True)  # Name of the rule that matched (e.g., "rejected_keywords", "interview_keywords")
+    llm_reason = Column(Text, nullable=True)  # LLM explanation for classification
+    classification_confidence = Column(String, nullable=True)  # Confidence score 0.0-1.0 (stored as string for flexibility)
+    classified_at = Column(DateTime(timezone=True), nullable=True, index=True)  # When classification was performed
+    # Enhanced traceability (9-layer pipeline)
+    signals_used = Column(JSON, nullable=True)  # List of signals used: ["calendar_invite", "sender_intelligence", etc.]
+    rules_triggered = Column(JSON, nullable=True)  # List of rules triggered: ["REJECTED_RULE_1.0", "INTERVIEW_RULE_1.0"]
+    classification_version = Column(String, nullable=True)  # Rule version (e.g., "1.0")
+    
+    # STEP 10: Additional classification fields for ONNX integration
+    raw_label = Column(String, nullable=True)  # Raw HF model label (e.g., "confirmation", "interview", "rejection")
+    model_name = Column(String, nullable=True)  # Model name (e.g., "job_email_classifier_v1")
+    decision_path = Column(JSON, nullable=True)  # Decision path array: ["passed_ignore_filter", "hf_model:interview:0.91", "saved"]
+    needs_review = Column(Boolean, default=False, nullable=False, index=True)  # Flag for manual review
+    
     # Relationships
     user = relationship("User", back_populates="applications")
+    classification_audit_logs = relationship("ClassificationAuditLog", back_populates="application", cascade="all, delete-orphan")
 
 class SyncState(Base):
     __tablename__ = "sync_states"
@@ -125,6 +151,31 @@ class ProfileLink(Base):
     
     # Relationships
     user = relationship("User", back_populates="profile_links")
+
+class ClassificationAuditLog(Base):
+    """
+    Audit log for classification changes (re-classification support).
+    
+    Tracks:
+    - old_status -> new_status transitions
+    - reason for re-classification
+    - timestamp
+    - source of classification (rule/LLM/manual)
+    """
+    __tablename__ = "classification_audit_logs"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    application_id = Column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False, index=True)
+    old_status = Column(String, nullable=True)  # Previous category (null for first classification)
+    new_status = Column(String, nullable=False)  # New category
+    reason = Column(Text, nullable=False)  # Explanation for the change
+    classification_source = Column(String, nullable=False)  # RULE, LLM, MANUAL, THREAD_CONTEXT
+    rule_name = Column(String, nullable=True)  # Rule name if source is RULE
+    confidence = Column(String, nullable=True)  # Confidence score if available
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    
+    # Relationships
+    application = relationship("Application", back_populates="classification_audit_logs")
 
 class SyncJobStatus(enum.Enum):
     PENDING = "PENDING"
@@ -344,14 +395,55 @@ def init_db():
             if 'last_activity_at' not in existing_app_columns:
                 missing_columns.append(('last_activity_at', 'TIMESTAMP WITH TIME ZONE'))
             
+            # Classification traceability fields
+            if 'classification_source' not in existing_app_columns:
+                missing_columns.append(('classification_source', 'VARCHAR'))
+            if 'rule_name' not in existing_app_columns:
+                missing_columns.append(('rule_name', 'VARCHAR'))
+            if 'llm_reason' not in existing_app_columns:
+                missing_columns.append(('llm_reason', 'TEXT'))
+            if 'classification_confidence' not in existing_app_columns:
+                missing_columns.append(('classification_confidence', 'VARCHAR'))
+            if 'classified_at' not in existing_app_columns:
+                missing_columns.append(('classified_at', 'TIMESTAMP WITH TIME ZONE'))
+            # Enhanced traceability (9-layer pipeline)
+            if 'signals_used' not in existing_app_columns:
+                missing_columns.append(('signals_used', 'JSON'))
+            if 'rules_triggered' not in existing_app_columns:
+                missing_columns.append(('rules_triggered', 'JSON'))
+            if 'classification_version' not in existing_app_columns:
+                missing_columns.append(('classification_version', 'VARCHAR'))
+            
+            # STEP 10: ONNX classification fields
+            if 'raw_label' not in existing_app_columns:
+                missing_columns.append(('raw_label', 'VARCHAR'))
+            if 'model_name' not in existing_app_columns:
+                missing_columns.append(('model_name', 'VARCHAR'))
+            if 'decision_path' not in existing_app_columns:
+                missing_columns.append(('decision_path', 'JSON'))
+            if 'needs_review' not in existing_app_columns:
+                missing_columns.append(('needs_review', 'BOOLEAN'))
+            
             if missing_columns:
                 try:
                     with engine.begin() as conn:
                         for col_name, col_type in missing_columns:
-                            conn.execute(text(f"ALTER TABLE applications ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                            if col_name == 'needs_review':
+                                # Special handling for needs_review with default
+                                conn.execute(text(f"ALTER TABLE applications ADD COLUMN IF NOT EXISTS {col_name} {col_type} DEFAULT false"))
+                            else:
+                                conn.execute(text(f"ALTER TABLE applications ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
                         logger.info(f"Added columns to applications table: {[c[0] for c in missing_columns]}")
                 except Exception as e:
                     logger.warning(f"Could not add columns to applications table: {e}")
+        
+        # Create classification_audit_logs table if it doesn't exist
+        if 'classification_audit_logs' not in tables:
+            try:
+                Base.metadata.create_all(bind=engine, tables=[ClassificationAuditLog.__table__])
+                logger.info("Created classification_audit_logs table")
+            except Exception as e:
+                logger.warning(f"Could not create classification_audit_logs table: {e}")
         
         # Create search indexes for applications table (for fuzzy search)
         if 'applications' in tables:
@@ -427,6 +519,67 @@ def init_db():
                             logger.info("Created index on last_activity_at")
                         except Exception:
                             # Column might not exist yet, skip
+                            pass
+                    
+                    # STEP 10: Create indexes for classification fields
+                    # Index on (user_id, status) for filtering by status
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_user_status'
+                    """))
+                    if not result.fetchone():
+                        try:
+                            conn.execute(text("""
+                                CREATE INDEX IF NOT EXISTS idx_applications_user_status 
+                                ON applications (user_id, category)
+                            """))
+                            logger.info("Created index on (user_id, category)")
+                        except Exception:
+                            pass
+                    
+                    # Index on (user_id, classified_at) for time-based queries
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_user_classified_at'
+                    """))
+                    if not result.fetchone():
+                        try:
+                            conn.execute(text("""
+                                CREATE INDEX IF NOT EXISTS idx_applications_user_classified_at 
+                                ON applications (user_id, classified_at DESC)
+                            """))
+                            logger.info("Created index on (user_id, classified_at)")
+                        except Exception:
+                            pass
+                    
+                    # Index on (user_id, gmail_thread_id) for thread-based queries
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_user_thread'
+                    """))
+                    if not result.fetchone():
+                        try:
+                            conn.execute(text("""
+                                CREATE INDEX IF NOT EXISTS idx_applications_user_thread 
+                                ON applications (user_id, gmail_thread_id)
+                            """))
+                            logger.info("Created index on (user_id, gmail_thread_id)")
+                        except Exception:
+                            pass
+                    
+                    # Index on needs_review for filtering
+                    result = conn.execute(text("""
+                        SELECT indexname FROM pg_indexes 
+                        WHERE tablename = 'applications' AND indexname = 'idx_applications_needs_review'
+                    """))
+                    if not result.fetchone():
+                        try:
+                            conn.execute(text("""
+                                CREATE INDEX IF NOT EXISTS idx_applications_needs_review 
+                                ON applications (needs_review) WHERE needs_review = true
+                            """))
+                            logger.info("Created partial index on needs_review")
+                        except Exception:
                             pass
             except Exception as e:
                 logger.warning(f"Could not create search indexes: {e}")

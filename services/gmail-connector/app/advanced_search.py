@@ -154,25 +154,29 @@ def advanced_search_applications(
     
     # Multi-select status filter
     if status and len(status) > 0:
-        # Normalize status values (uppercase, handle OFFER/ACCEPTED → OFFER_ACCEPTED)
+        # Normalize status values (uppercase, handle OFFER/ACCEPTED → OFFER_ACCEPTED, APPLIED → ACTIVE)
         normalized_statuses = []
         for s in status:
             s_upper = s.upper().strip()
             if s_upper in ("OFFER", "ACCEPTED"):
                 s_upper = "OFFER_ACCEPTED"
+            elif s_upper == "APPLIED":
+                # Map APPLIED to ACTIVE (dashboard compatibility - ACTIVE is the actual DB category)
+                s_upper = "ACTIVE"
             normalized_statuses.append(s_upper)
         
         if normalized_statuses:
             base_query = base_query.filter(Application.category.in_(normalized_statuses))
     
     # Date range filter (applied to received_at, which serves as applied_at)
-    if date_from:
+    # Only apply filters if dates are provided (None means no filter - show all)
+    if date_from is not None:
         # Ensure timezone-aware
         if date_from.tzinfo is None:
             date_from = date_from.replace(tzinfo=timezone.utc)
         base_query = base_query.filter(Application.received_at >= date_from)
     
-    if date_to:
+    if date_to is not None:
         # Ensure timezone-aware and include the full day
         if date_to.tzinfo is None:
             date_to = date_to.replace(tzinfo=timezone.utc)
@@ -214,6 +218,9 @@ def advanced_search_applications(
         category = app.category.upper() if app.category else "APPLIED"
         if category in ("ACCEPTED", "OFFER"):
             category = "OFFER_ACCEPTED"
+        elif category == "ACTIVE":
+            # Map ACTIVE to APPLIED for frontend compatibility (dashboard shows ACTIVE as APPLIED)
+            category = "APPLIED"
         
         # Generate Gmail deep link using message ID
         if not app.gmail_message_id:
@@ -234,6 +241,7 @@ def advanced_search_applications(
             "sender_email": app.from_email,
             "sender_domain": extract_domain_from_email(app.from_email) if app.from_email else None,
             "status": category,
+            "category": category,  # Add category field for frontend compatibility
             "applied_at": app.received_at.isoformat() if app.received_at else None,  # received_at serves as applied_at
             "received_at": app.received_at.isoformat() if app.received_at else None,
             "email_message_id": app.gmail_message_id,

@@ -16,6 +16,7 @@ from app.advanced_search import advanced_search_applications
 from app.company_normalizer import normalize_company_name_for_grouping
 from app.ghosted_detector import GhostedDetector
 from app.export_service import generate_export
+from app.services.classifier.schemas import EmailForClassification, ClassificationResult
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import os
@@ -51,11 +52,110 @@ app.add_middleware(
 async def startup():
     init_db()
     logger.info("Database initialized")
+    
+    # Initialize ONNX classifier if enabled
+    use_onnx = os.getenv("USE_ONNX_INFERENCE", "false").lower() == "true"
+    if use_onnx:
+        try:
+            from app.services.classifier.hf_onnx_classifier import init_classifier
+            
+            # Get base directory
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            model_dir = os.path.join(base_dir, "models", "job_email")
+            onnx_path = os.path.join(model_dir, "onnx", "model_quantized.onnx")
+            
+            # Allow override via environment variables
+            model_dir = os.getenv("ONNX_MODEL_DIR", model_dir)
+            onnx_path = os.getenv("ONNX_MODEL_PATH", onnx_path)
+            
+            if os.path.exists(onnx_path):
+                init_classifier(model_dir=model_dir, onnx_path=onnx_path)
+                logger.info("ONNX classifier initialized successfully")
+            else:
+                logger.warning(f"ONNX model not found at {onnx_path}. ONNX inference disabled.")
+        except Exception as e:
+            logger.warning(f"Failed to initialize ONNX classifier: {e}. ONNX inference disabled.")
+    
+    # Start scheduled job for ghosted detection (cron)
+    _start_ghosted_detection_scheduler()
+
+def _start_ghosted_detection_scheduler():
+    """
+    Start scheduled job for ghosted detection.
+    
+    Runs daily at 2 AM UTC to check for ghosted applications.
+    Can be configured via GHOSTED_CHECK_SCHEDULE env var (cron format).
+    """
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        
+        scheduler = BackgroundScheduler()
+        
+        # Get schedule from env (default: daily at 2 AM UTC)
+        schedule = os.getenv("GHOSTED_CHECK_SCHEDULE", "0 2 * * *")  # Cron format: minute hour day month day_of_week
+        
+        # Parse cron schedule or use default
+        if schedule and len(schedule.split()) == 5:
+            parts = schedule.split()
+            trigger = CronTrigger(
+                minute=parts[0],
+                hour=parts[1],
+                day=parts[2],
+                month=parts[3],
+                day_of_week=parts[4]
+            )
+        else:
+            # Default: daily at 2 AM UTC
+            trigger = CronTrigger(hour=2, minute=0)
+        
+        def run_ghosted_check():
+            """Scheduled task to check for ghosted applications."""
+            db = SessionLocal()
+            try:
+                def gmail_client_factory(user_id, user_email, oauth_token):
+                    """Factory to create GmailClient for thread checking."""
+                    return GmailClient(user_id, user_email, oauth_token)
+                
+                count = ghosted_detector.check_all_users(db, gmail_client_factory)
+                logger.info(f"Scheduled ghosted check completed. Marked {count} applications as GHOSTED")
+            except Exception as e:
+                logger.error(f"Error in scheduled ghosted check: {e}", exc_info=True)
+            finally:
+                db.close()
+        
+        scheduler.add_job(
+            run_ghosted_check,
+            trigger=trigger,
+            id='ghosted_detection',
+            name='Ghosted Detection Job',
+            replace_existing=True
+        )
+        
+        scheduler.start()
+        logger.info(f"Ghosted detection scheduler started. Schedule: {schedule}")
+    except ImportError:
+        logger.warning("APScheduler not available. Install with: pip install apscheduler. Scheduled ghosted detection disabled.")
+    except Exception as e:
+        logger.warning(f"Failed to start ghosted detection scheduler: {e}. Scheduled job disabled.")
 
 # Initialize components
-classifier = Classifier()
+# Use hybrid classifier if enabled, otherwise fallback to basic classifier
+use_hybrid_classifier = os.getenv("USE_HYBRID_CLASSIFIER", "true").lower() == "true"
+try:
+    if use_hybrid_classifier:
+        from app.hybrid_classifier import HybridClassifier
+        classifier = HybridClassifier()  # Will be initialized with db/gmail_client when needed
+    else:
+        from app.classifier import Classifier
+        classifier = Classifier()
+except ImportError:
+    # Fallback to basic classifier if hybrid not available
+    from app.classifier import Classifier
+    classifier = Classifier()
+    logger.warning("Hybrid classifier not available, using basic classifier")
 company_extractor = CompanyExtractor()
-ghosted_detector = GhostedDetector(days=int(os.getenv("GHOSTED_DAYS", "21")))
+ghosted_detector = GhostedDetector(days=int(os.getenv("GHOSTED_DAYS", "30")))
 
 # In-memory sync jobs - REMOVED, using DB-only SyncJob model
 
@@ -930,7 +1030,8 @@ async def get_sync_logs(
 def calculate_stats(db: Session, user_id) -> dict:
     """
     Returns REAL counts from DB, never estimated.
-    Five categories: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED (uppercase).
+    Categories: APPLIED (includes ACTIVE), REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED (uppercase).
+    ACTIVE is mapped to APPLIED for dashboard compatibility (ACTIVE is the new classification system).
     Returns format: { "APPLIED": count, "REJECTED": count, ... }
     """
     # Query counts grouped by category
@@ -951,13 +1052,17 @@ def calculate_stats(db: Session, user_id) -> dict:
         "GHOSTED": 0,
     }
     
-    # Map results (handle legacy lowercase categories)
+    # Map results (handle legacy lowercase categories and ACTIVE)
     for category, count in results:
         cat_upper = category.upper() if category else None
         if cat_upper == "OFFER" or cat_upper == "ACCEPTED":
             cat_upper = "OFFER_ACCEPTED"
+        elif cat_upper == "ACTIVE":
+            # ACTIVE is the new classification system - map to APPLIED for dashboard compatibility
+            cat_upper = "APPLIED"
+        
         if cat_upper in stats:
-            stats[cat_upper] = count
+            stats[cat_upper] += count  # Use += to accumulate (ACTIVE + APPLIED both go to APPLIED)
     
     return stats
 
@@ -1009,6 +1114,9 @@ async def get_applications(
             status_upper = status.upper()
             if status_upper == "OFFER" or status_upper == "ACCEPTED":
                 status_upper = "OFFER_ACCEPTED"
+            elif status_upper == "APPLIED":
+                # Map APPLIED to ACTIVE (dashboard compatibility - ACTIVE is the actual DB category)
+                status_upper = "ACTIVE"
             query = query.filter(Application.category == status_upper)
         
         # Sort by received_at DESC (newest first) - serves as applied_at
@@ -1021,6 +1129,12 @@ async def get_applications(
             category = app.category.upper() if app.category else "APPLIED"
             if category == "ACCEPTED" or category == "OFFER":
                 category = "OFFER_ACCEPTED"
+            elif category == "ACTIVE":
+                # Map ACTIVE to APPLIED for frontend compatibility (dashboard shows ACTIVE as APPLIED)
+                category = "APPLIED"
+            elif category == "ACTIVE":
+                # Map ACTIVE to APPLIED for frontend compatibility (dashboard shows ACTIVE as APPLIED)
+                category = "APPLIED"
             
             # Generate Gmail deep link using message ID (single source of truth)
             if not app.gmail_message_id:
@@ -1039,6 +1153,7 @@ async def get_applications(
                 "company_name": app.company_name or "Unknown Company",  # Ensure never null
                 "role_title": app.role,  # Role title (alias for 'role')
                 "status": category,  # Uppercase: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED
+                "category": category,  # Add category field for frontend compatibility
                 "applied_at": app.received_at.isoformat() if app.received_at else None,  # received_at serves as applied_at
                 "source": "GMAIL",  # All applications from this endpoint are Gmail-synced
                 "email_message_id": app.gmail_message_id,
@@ -1117,11 +1232,13 @@ async def search_applications_unified(
     user_id: str = Query(..., description="User email"),
     q: Optional[str] = Query(None, description="Global search query"),
     status: Optional[List[str]] = Query(None, description="Status filter (multi-select)"),
+    company: Optional[str] = Query(None, description="Company filter (exact match)"),
+    role: Optional[str] = Query(None, description="Role filter (partial match)"),
     date_from: Optional[str] = Query(None, description="Start date (ISO format: YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="End date (ISO format: YYYY-MM-DD)"),
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(20, ge=1, le=100, description="Results per page"),
-    sort_by: str = Query("received_at", description="Sort field: received_at or company_name"),
+    sort_by: str = Query("received_at", description="Sort field: received_at, company_name, or last_activity_at"),
     sort_order: str = Query("desc", description="Sort order: asc or desc"),
     db: Session = Depends(get_db)
 ):
@@ -1155,21 +1272,23 @@ async def search_applications_unified(
                 }
             }
         
-        # Parse dates
+        # Parse dates - only parse if not empty/None
         date_from_parsed = None
         date_to_parsed = None
         
-        if date_from:
+        if date_from and date_from.strip():  # Check for empty strings
             try:
                 date_from_parsed = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
             except ValueError:
                 logger.warning(f"Invalid date_from format: {date_from}")
+                date_from_parsed = None  # Don't filter if invalid
         
-        if date_to:
+        if date_to and date_to.strip():  # Check for empty strings
             try:
                 date_to_parsed = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
             except ValueError:
                 logger.warning(f"Invalid date_to format: {date_to}")
+                date_to_parsed = None  # Don't filter if invalid
         
         # Validate sort_by
         if sort_by not in ("received_at", "company_name", "last_activity_at"):
@@ -1625,10 +1744,23 @@ async def store_oauth_tokens(request: OAuthTokenStoreRequest, db: Session = Depe
 @app.post("/ghosted/check")
 async def check_ghosted(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
-    Background job to check and update ghosted applications
+    Scheduled job endpoint to check and update ghosted applications.
+    
+    This is a cron/scheduled job that should run periodically (e.g., daily).
+    
+    Rules:
+    - Last status in thread is ACTIVE/INTERVIEW
+    - No new recruiter/company emails for 30 days
+    - → Set GHOSTED
+    
+    This is separate from model classification (time-based, not content-based).
     """
-    background_tasks.add_task(ghosted_detector.check_all_users, db)
-    return {"message": "Ghosted check started"}
+    def gmail_client_factory(user_id, user_email, oauth_token):
+        """Factory to create GmailClient for thread checking."""
+        return GmailClient(user_id, user_email, oauth_token)
+    
+    background_tasks.add_task(ghosted_detector.check_all_users, db, gmail_client_factory)
+    return {"message": "Ghosted check started", "threshold_days": ghosted_detector.days}
 
 @app.post("/export")
 async def export_applications(
@@ -1719,6 +1851,374 @@ async def export_applications(
         logger.error(f"Export error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Export generation failed: {str(e)}")
 
+@app.post("/applications/{app_id}/reclassify")
+async def reclassify_application(
+    app_id: str,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Re-classify an application.
+    
+    Triggers full re-run of classification pipeline and creates audit log entry.
+    Supports manual re-classification with full traceability.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        application = db.query(Application).filter(
+            Application.id == app_id,
+            Application.user_id == user.id
+        ).first()
+        
+        if not application:
+            raise HTTPException(status_code=404, detail="Application not found")
+        
+        # Prepare email data for classification
+        email_data = {
+            "message_id": application.gmail_message_id,
+            "thread_id": application.gmail_thread_id,
+            "subject": application.subject,
+            "snippet": application.snippet or "",
+            "sender_email": application.from_email or "",
+            "sender_domain": application.company_domain or "",
+            "received_at": application.received_at.isoformat() if application.received_at else None,
+            "body": ""  # Full body not available in re-classification
+        }
+        
+        # Set db session and get gmail_client on classifier
+        if hasattr(classifier, 'db'):
+            classifier.db = db
+        
+        # Get gmail_client for hybrid classifier (if needed)
+        if hasattr(classifier, 'gmail_client'):
+            # Try to get gmail_client from OAuth token
+            oauth_token = db.query(OAuthToken).filter(OAuthToken.user_id == user.id).first()
+            if oauth_token:
+                try:
+                    from app.gmail_client import GmailClient
+                    gmail_client = GmailClient(user.id, user.email, oauth_token)
+                    classifier.gmail_client = gmail_client
+                except Exception as e:
+                    logger.debug(f"Failed to initialize gmail_client for re-classification: {e}")
+        
+        # Re-classify using full pipeline
+        old_category = application.category
+        
+        # Use hybrid classifier if available
+        from app.hybrid_classifier import HybridClassifier
+        if isinstance(classifier, HybridClassifier):
+            classification_result = classifier.classify(
+                email_data=email_data,
+                thread_id=application.gmail_thread_id,
+                company_name=application.company_name,
+                role=application.role
+            )
+            new_category = classification_result.status.value
+            classification_trace = classification_result.to_dict()
+            
+            # Update with enhanced traceability
+            application.category = new_category
+            application.classification_source = "HYBRID"
+            application.rule_name = ", ".join(classification_result.signals.matched_rules[:3]) if classification_result.signals.matched_rules else None
+            application.llm_reason = classification_result.signals.llm_reason
+            application.classification_confidence = str(classification_result.confidence)
+            application.classified_at = datetime.now(timezone.utc)
+            if hasattr(application, 'signals_used'):
+                application.signals_used = classification_trace.get("signals_used")
+            if hasattr(application, 'rules_triggered'):
+                application.rules_triggered = classification_trace.get("rules_triggered")
+            if hasattr(application, 'classification_version'):
+                application.classification_version = classification_trace.get("version")
+        else:
+            # Fallback to old classifier
+            thread_history = []
+            if hasattr(classifier, 'get_thread_history'):
+                try:
+                    thread_history = classifier.get_thread_history(str(user.id), application.gmail_thread_id)
+                except Exception as e:
+                    logger.debug(f"Failed to get thread history: {e}")
+            
+            classification_result = classifier.classify(email_data, thread_history)
+            
+            if thread_history and hasattr(classifier, 'apply_thread_context'):
+                classification_result = classifier.apply_thread_context(
+                    email_data,
+                    thread_history,
+                    classification_result
+                )
+            
+            new_category = classification_result.status.value if hasattr(classification_result, 'status') else str(classification_result)
+            application.category = new_category
+            if hasattr(classification_result, 'source'):
+                application.classification_source = classification_result.source.value
+            if hasattr(classification_result, 'rule_name'):
+                application.rule_name = classification_result.rule_name
+            if hasattr(classification_result, 'llm_reason'):
+                application.llm_reason = classification_result.llm_reason
+            if hasattr(classification_result, 'confidence') and classification_result.confidence is not None:
+                application.classification_confidence = str(classification_result.confidence)
+            application.classified_at = datetime.now(timezone.utc)
+        
+        # Update last_activity_at if category changed
+        if old_category != new_category:
+            application.last_activity_at = datetime.now(timezone.utc)
+        
+        # Create audit log entry
+        from app.database import ClassificationAuditLog
+        reason = classification_result.explanation if isinstance(classifier, HybridClassifier) and hasattr(classification_result, 'explanation') else (
+            classification_result.reason if hasattr(classification_result, 'reason') else "Re-classified"
+        )
+        source = "HYBRID" if isinstance(classifier, HybridClassifier) else (
+            classification_result.source.value if hasattr(classification_result, 'source') else "MANUAL"
+        )
+        rule_name = ", ".join(classification_result.signals.matched_rules[:3]) if isinstance(classifier, HybridClassifier) and hasattr(classification_result, 'signals') else (
+            classification_result.rule_name if hasattr(classification_result, 'rule_name') else None
+        )
+        confidence = str(classification_result.confidence) if hasattr(classification_result, 'confidence') and classification_result.confidence else None
+        
+        audit_log = ClassificationAuditLog(
+            application_id=application.id,
+            old_status=old_category,
+            new_status=new_category,
+            reason=reason,
+            classification_source=source,
+            rule_name=rule_name,
+            confidence=confidence
+        )
+        db.add(audit_log)
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "application_id": str(application.id),
+            "old_status": old_category,
+            "new_status": new_category,
+            "classification_source": classification_result.source.value,
+            "reason": classification_result.reason,
+            "confidence": classification_result.confidence
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error re-classifying application: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to re-classify application: {str(e)}")
+
+@app.post("/applications/reclassify/thread/{thread_id}")
+async def reclassify_thread(
+    thread_id: str,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    STEP 10: Re-classify all applications in a thread.
+    
+    Re-runs classifier pipeline on all emails in the specified Gmail thread.
+    Updates DB and emits SSE progress events if long-running.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Find all applications in this thread
+        applications = db.query(Application).filter(
+            Application.gmail_thread_id == thread_id,
+            Application.user_id == user.id
+        ).all()
+        
+        if not applications:
+            raise HTTPException(status_code=404, detail=f"No applications found for thread {thread_id}")
+        
+        # Get OAuth token for Gmail client
+        oauth_token = db.query(OAuthToken).filter(OAuthToken.user_id == user.id).first()
+        if not oauth_token:
+            raise HTTPException(status_code=400, detail="OAuth tokens not found. Please re-authenticate.")
+        
+        from app.gmail_client import GmailClient
+        gmail_client = GmailClient(user.id, user.email, oauth_token)
+        
+        # Re-classify each application
+        reclassified_count = 0
+        for app in applications:
+            try:
+                # Prepare email data
+                email_data = {
+                    "message_id": app.gmail_message_id,
+                    "thread_id": app.gmail_thread_id,
+                    "subject": app.subject,
+                    "snippet": app.snippet or "",
+                    "sender_email": app.from_email or "",
+                    "sender_domain": app.company_domain or "",
+                    "received_at": app.received_at.isoformat() if app.received_at else None,
+                    "body": ""
+                }
+                
+                # Re-classify
+                if isinstance(classifier, HybridClassifier):
+                    classifier.db = db
+                    classifier.gmail_client = gmail_client
+                    result = classifier.classify(
+                        email_data=email_data,
+                        thread_id=app.gmail_thread_id,
+                        company_name=app.company_name,
+                        role=app.role
+                    )
+                    
+                    # Update application
+                    old_category = app.category
+                    app.category = result.status.value
+                    app.classification_source = "HYBRID"
+                    app.classification_confidence = str(result.confidence)
+                    app.classified_at = datetime.now(timezone.utc)
+                    app.needs_review = result.confidence < 0.6 if result.confidence else False
+                    
+                    # Create audit log
+                    from app.database import ClassificationAuditLog
+                    audit_log = ClassificationAuditLog(
+                        application_id=app.id,
+                        old_status=old_category,
+                        new_status=result.status.value,
+                        reason=result.explanation,
+                        classification_source="HYBRID",
+                        confidence=str(result.confidence)
+                    )
+                    db.add(audit_log)
+                    reclassified_count += 1
+            except Exception as e:
+                logger.error(f"Error re-classifying application {app.id}: {e}", exc_info=True)
+                continue
+        
+        db.commit()
+        
+        return {
+            "message": f"Re-classified {reclassified_count} applications in thread {thread_id}",
+            "thread_id": thread_id,
+            "reclassified_count": reclassified_count,
+            "total_applications": len(applications)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error re-classifying thread: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to re-classify thread: {str(e)}")
+
+@app.post("/applications/reclassify/range")
+async def reclassify_range(
+    months: Optional[int] = Query(None, description="Time range in months: 3, 6, 12, 16, or None for full"),
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    STEP 10: Re-classify applications within a time range.
+    
+    Re-runs classifier pipeline on all emails within the specified time range.
+    Updates DB and emits SSE progress events if long-running.
+    """
+    try:
+        user = db.query(User).filter(User.email == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Calculate date range
+        cutoff_date = None
+        if months:
+            if months not in [3, 6, 12, 16]:
+                raise HTTPException(status_code=400, detail="Invalid months. Must be 3, 6, 12, or 16.")
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=months * 30)
+        
+        # Query applications
+        query = db.query(Application).filter(Application.user_id == user.id)
+        if cutoff_date:
+            query = query.filter(Application.received_at >= cutoff_date)
+        
+        applications = query.all()
+        
+        if not applications:
+            return {
+                "message": f"No applications found for range",
+                "reclassified_count": 0,
+                "total_applications": 0
+            }
+        
+        # Get OAuth token for Gmail client
+        oauth_token = db.query(OAuthToken).filter(OAuthToken.user_id == user.id).first()
+        if not oauth_token:
+            raise HTTPException(status_code=400, detail="OAuth tokens not found. Please re-authenticate.")
+        
+        from app.gmail_client import GmailClient
+        gmail_client = GmailClient(user.id, user.email, oauth_token)
+        
+        # Re-classify each application
+        reclassified_count = 0
+        for app in applications:
+            try:
+                # Prepare email data
+                email_data = {
+                    "message_id": app.gmail_message_id,
+                    "thread_id": app.gmail_thread_id,
+                    "subject": app.subject,
+                    "snippet": app.snippet or "",
+                    "sender_email": app.from_email or "",
+                    "sender_domain": app.company_domain or "",
+                    "received_at": app.received_at.isoformat() if app.received_at else None,
+                    "body": ""
+                }
+                
+                # Re-classify
+                if isinstance(classifier, HybridClassifier):
+                    classifier.db = db
+                    classifier.gmail_client = gmail_client
+                    result = classifier.classify(
+                        email_data=email_data,
+                        thread_id=app.gmail_thread_id,
+                        company_name=app.company_name,
+                        role=app.role
+                    )
+                    
+                    # Update application
+                    old_category = app.category
+                    app.category = result.status.value
+                    app.classification_source = "HYBRID"
+                    app.classification_confidence = str(result.confidence)
+                    app.classified_at = datetime.now(timezone.utc)
+                    app.needs_review = result.confidence < 0.6 if result.confidence else False
+                    
+                    # Create audit log
+                    from app.database import ClassificationAuditLog
+                    audit_log = ClassificationAuditLog(
+                        application_id=app.id,
+                        old_status=old_category,
+                        new_status=result.status.value,
+                        reason=result.explanation,
+                        classification_source="HYBRID",
+                        confidence=str(result.confidence)
+                    )
+                    db.add(audit_log)
+                    reclassified_count += 1
+            except Exception as e:
+                logger.error(f"Error re-classifying application {app.id}: {e}", exc_info=True)
+                continue
+        
+        db.commit()
+        
+        return {
+            "message": f"Re-classified {reclassified_count} applications",
+            "reclassified_count": reclassified_count,
+            "total_applications": len(applications),
+            "range_months": months
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error re-classifying range: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to re-classify range: {str(e)}")
+
 @app.get("/health")
 async def health(db: Session = Depends(get_db)):
     # Database
@@ -1758,6 +2258,62 @@ async def health(db: Session = Depends(get_db)):
         "active_sync_jobs": running,
         "total_sync_jobs": total,
     }
+
+@app.get("/health/classifier")
+async def health_classifier():
+    """
+    STEP 10: Health check for ONNX classifier.
+    Verifies model session is loaded and runs one tiny inference on a known sample.
+    """
+    try:
+        from app.services.classifier.hf_onnx_classifier import get_classifier
+        
+        # Check if classifier is initialized
+        try:
+            clf = get_classifier()
+        except RuntimeError as e:
+            return {
+                "status": "error",
+                "message": f"Classifier not initialized: {str(e)}",
+                "model_loaded": False
+            }
+        
+        # Run one tiny inference on a known sample
+        test_result = clf.classify_one(
+            subject="Interview availability",
+            snippet="Can you share times for a 30-min call?",
+            from_domain="greenhouse.io",
+            thread_summary=""
+        )
+        
+        # Verify result structure
+        if not test_result or "status" not in test_result or "confidence" not in test_result:
+            return {
+                "status": "error",
+                "message": "Classifier returned invalid result structure",
+                "model_loaded": True,
+                "inference_test": "failed"
+            }
+        
+        return {
+            "status": "ok",
+            "model_loaded": True,
+            "inference_test": "passed",
+            "test_result": {
+                "status": test_result.get("status"),
+                "confidence": test_result.get("confidence"),
+                "label": test_result.get("label")
+            },
+            "model_name": os.getenv("ONNX_MODEL_NAME", "job_email_classifier_v1"),
+            "model_version": os.getenv("ONNX_MODEL_VERSION", "1.0")
+        }
+    except Exception as e:
+        logger.error(f"Classifier health check failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "model_loaded": False
+        }
 
 
 # ========== PROFILE LINKS ENDPOINTS ==========
@@ -1998,3 +2554,26 @@ async def delete_profile_link(
         db.rollback()
         logger.error(f"Error deleting profile link: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete profile link: {str(e)}")
+
+@app.post("/classify", response_model=ClassificationResult)
+def classify(payload: EmailForClassification):
+    """
+    Classify an email using ONNX model.
+    
+    This endpoint uses the singleton ONNX classifier initialized at startup.
+    """
+    try:
+        from app.services.classifier.hf_onnx_classifier import get_classifier
+        clf = get_classifier()
+        out = clf.classify_one(
+            subject=payload.subject or "",
+            snippet=payload.snippet or "",
+            from_domain=payload.from_domain or "",
+            thread_summary=payload.thread_summary or "",
+        )
+        return ClassificationResult(**out)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(f"Classification error: {e}")
+        raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")

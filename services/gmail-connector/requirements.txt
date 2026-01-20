@@ -18,3 +18,12 @@ rq==1.15.1
 pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-mock==3.12.0
+
+# ONNX Runtime and Hugging Face for LLM inference
+onnxruntime>=1.16.0
+transformers>=4.35.0
+tokenizers>=0.15.0
+numpy>=1.24.0
+
+# Scheduled jobs (for ghosted detection cron)
+apscheduler>=3.10.0
