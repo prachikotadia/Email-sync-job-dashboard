@@ -25,7 +25,8 @@ This project uses a microservices architecture with Docker:
 
 1. **Clone and navigate to the project:**
    ```bash
-   cd job-tracker
+   git clone <repository-url>
+   cd Email-sync-job-dashboard
    ```
 
 2. **Run setup script:**
@@ -49,6 +50,8 @@ This project uses a microservices architecture with Docker:
    ```bash
    docker-compose up --build
    ```
+
+   **Note for Mac users**: See [MAC_SETUP.md](./MAC_SETUP.md) for detailed Mac-specific instructions and troubleshooting.
 
 #### For Windows:
 
