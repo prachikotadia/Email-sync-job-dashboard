@@ -74,22 +74,58 @@ function Dashboard() {
     // Accumulate logs and update progress
     setSyncState(prevState => {
       const existingLogs = prevState.progress?.logs || []
-      const newLog = {
+      
+      // Add detailed log message if available (for real-time UI display)
+      const logsToAdd = []
+      
+      // Add log_message if present (more detailed than message)
+      if (progressEvent.log_message) {
+        const detailedLog = {
+          time: progressEvent.ts,
+          message: progressEvent.log_message,
+          type: progressEvent.log_type || progressEvent.level || 'info',
+          email_id: progressEvent.email_id,
+          retry_count: progressEvent.retry_count,
+          retry_after_seconds: progressEvent.retry_after_seconds
+        }
+        logsToAdd.push(detailedLog)
+      }
+      
+      // Also add regular message if different from log_message
+      const regularLog = {
         time: progressEvent.ts,
         message: progressEvent.message,
         type: progressEvent.level || 'info',
-        email_id: progressEvent.email_id,  // Include email_id for per-email tracking
-        retry_count: progressEvent.retry_count,  // Include retry count
-        retry_after_seconds: progressEvent.retry_after_seconds  // Include backoff duration
+        email_id: progressEvent.email_id,
+        retry_count: progressEvent.retry_count,
+        retry_after_seconds: progressEvent.retry_after_seconds
       }
       
-      // Only add if it's a new log (different timestamp or message or email_id)
-      const isNewLog = !existingLogs.some(log => 
-        log.time === newLog.time && 
-        log.message === newLog.message &&
-        log.email_id === newLog.email_id
-      )
-      const updatedLogs = isNewLog ? [...existingLogs, newLog] : existingLogs
+      // Only add regular log if it's different from log_message
+      if (!progressEvent.log_message || progressEvent.message !== progressEvent.log_message) {
+        logsToAdd.push(regularLog)
+      }
+      
+      // Add logs from event.logs array if present
+      if (progressEvent.logs && Array.isArray(progressEvent.logs)) {
+        logsToAdd.push(...progressEvent.logs)
+      }
+      
+      // Filter out duplicates and add new logs
+      const updatedLogs = [...existingLogs]
+      logsToAdd.forEach(newLog => {
+        const isNewLog = !existingLogs.some(log => 
+          log.time === newLog.time && 
+          log.message === newLog.message &&
+          log.email_id === newLog.email_id
+        )
+        if (isNewLog) {
+          updatedLogs.push(newLog)
+        }
+      })
+      
+      // Keep only last 200 logs for performance
+      const finalLogs = updatedLogs.slice(-200)
       
       // Get counts from event - use the latest values
       const counts = progressEvent.counts || {}
@@ -118,7 +154,8 @@ function Dashboard() {
           logs: updatedLogs.slice(-200), // Keep last 200 logs
           email_entries: prevState.progress?.email_entries || [],
           // Store raw event for debugging
-          lastEvent: progressEvent
+          lastEvent: progressEvent,
+          logs: finalLogs
         }
       }
     })

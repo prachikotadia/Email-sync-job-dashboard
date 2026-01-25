@@ -147,14 +147,32 @@ export function useGmailSyncProgress(syncId) {
             return
           }
           
+          // Add log entry to event if log_message is present
+          if (eventData.log_message) {
+            // Add to logs array for UI display
+            if (!eventData.logs) {
+              eventData.logs = []
+            }
+            eventData.logs.push({
+              time: eventData.ts || new Date().toISOString(),
+              message: eventData.log_message,
+              type: eventData.log_type || eventData.level || 'info',
+              email_id: eventData.email_id,
+              retry_count: eventData.retry_count,
+              retry_after_seconds: eventData.retry_after_seconds
+            })
+          }
+          
           // Add to batch
           eventBatchRef.current.push(eventData)
           
-          // Throttle: Only update UI every THROTTLE_MS
+          // Throttle: Only update UI every THROTTLE_MS (but allow more frequent for real-time feel)
+          // Reduce throttle to 50ms for more real-time updates during active syncing
+          const THROTTLE_MS_REALTIME = 50  // 20 updates/sec for real-time feel
           const now = Date.now()
           const timeSinceLastUpdate = now - lastUpdateTimeRef.current
           
-          if (timeSinceLastUpdate >= THROTTLE_MS) {
+          if (timeSinceLastUpdate >= THROTTLE_MS_REALTIME) {
             // Update immediately
             flushEventBatch()
             lastUpdateTimeRef.current = now
@@ -166,7 +184,7 @@ export function useGmailSyncProgress(syncId) {
             batchTimeoutRef.current = setTimeout(() => {
               flushEventBatch()
               lastUpdateTimeRef.current = Date.now()
-            }, THROTTLE_MS - timeSinceLastUpdate)
+            }, THROTTLE_MS_REALTIME - timeSinceLastUpdate)
           }
         } catch (err) {
           console.error('Failed to parse SSE event:', err)

@@ -215,13 +215,19 @@ class GmailClient:
         page_token: Optional[str] = None
     ) -> tuple[List[Dict], str, Optional[str]]:
         """
-        Fetch ALL messages WITHOUT query filtering (per spec requirement 0)
+        Fetch messages from Gmail with STRICT time range enforcement.
         
         Mode A - Full History: fetch ALL emails (start_timestamp_ms=None)
-        Mode B - Time Range: fetch emails after timestamp (start_timestamp_ms set)
+        Mode B - Time Range: fetch ONLY emails after timestamp (start_timestamp_ms set)
         
-        NO subject queries, NO q parameter filtering
-        Filtering happens AFTER fetching
+        CRITICAL TIME RANGE BEHAVIOR:
+        - If start_timestamp_ms is provided, Gmail API 'after:' filter is used
+        - This means ONLY emails with internalDate >= start_timestamp_ms are returned
+        - NO emails before the timestamp will be fetched (strict enforcement)
+        - This is the ONLY acceptable use of 'q' parameter (time-based, not subject/keyword)
+        
+        NO subject queries, NO keyword filtering in 'q' parameter
+        Filtering happens AFTER fetching (for candidate job email detection)
         
         Returns: (messages, latest_history_id, next_page_token)
         """
@@ -234,6 +240,8 @@ class GmailClient:
         
         if history_id:
             # Incremental sync using history
+            # NOTE: History API doesn't support time filtering, but new messages should be recent
+            # However, to be STRICT: if time_range is set, we'll filter messages by timestamp after fetching
             try:
                 history = self.service.users().history().list(
                     userId='me',
@@ -261,6 +269,16 @@ class GmailClient:
                             id=msg_id,
                             format='full'
                         ).execute()
+                        
+                        # STRICT TIME RANGE ENFORCEMENT: Filter by timestamp if time range is set
+                        # Even in incremental sync, respect the time range boundary
+                        if start_timestamp_ms:
+                            internal_date = int(message.get('internalDate', 0))
+                            if internal_date < start_timestamp_ms:
+                                # Message is older than time range - skip it
+                                logger.debug(f"Skipping message {msg_id}: internalDate {internal_date} < time_range {start_timestamp_ms}")
+                                continue
+                        
                         messages.append(message)
                     except Exception as e:
                         logger.warning(f"Error fetching message {msg_id}: {e}")
@@ -271,7 +289,7 @@ class GmailClient:
                 
             except Exception as e:
                 logger.error(f"Error in incremental sync: {e}")
-                # Fall back to full sync
+                # Fall back to full sync (but still respect time_range if set)
                 history_id = None
         
         if not history_id:
@@ -292,14 +310,24 @@ class GmailClient:
                         'includeSpamTrash': False
                     }
                     
-                    # For time range mode: filter by timestamp
-                    # NOTE: Gmail API requires 'q' parameter for time filtering
-                    # However, this is time-based (after:timestamp), NOT subject/keyword-based
-                    # For full history mode (start_timestamp_ms=None), NO q parameter is used
+                    # PERFECT TIME RANGE FILTERING:
+                    # If start_timestamp_ms is provided, use Gmail API 'after:' filter
+                    # This ensures ONLY emails after the timestamp are fetched (strict enforcement)
+                    # NOTE: This is the ONLY acceptable use of 'q' parameter (time-based, not subject/keyword)
                     if start_timestamp_ms:
                         # Convert milliseconds to seconds for Gmail API 'after:' filter
-                        # This is the only acceptable use of 'q' - time-based filtering, not subject/keyword
-                        list_params['q'] = f'after:{start_timestamp_ms // 1000}'
+                        # Gmail API 'after:' filter: returns emails where internalDate >= timestamp
+                        # Example: 'after:1729728000' returns all emails with internalDate >= Oct 24, 2024 00:00:00 UTC
+                        # NO emails before this timestamp will be included (strict enforcement)
+                        timestamp_seconds = start_timestamp_ms // 1000
+                        list_params['q'] = f'after:{timestamp_seconds}'
+                        
+                        # Log the exact filter being used
+                        from datetime import datetime, timezone
+                        filter_date = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
+                        logger.info(f"TIME RANGE FILTER ACTIVE: 'after:{timestamp_seconds}' ({filter_date.strftime('%Y-%m-%d %H:%M:%S UTC')})")
+                        logger.info(f"  → Will ONLY fetch emails with internalDate >= {filter_date.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                        logger.info(f"  → Will NOT fetch any emails before this timestamp")
                     
                     # Use retry logic for list call
                     def list_page():

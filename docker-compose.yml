@@ -133,6 +133,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
       - GHOSTED_DAYS=${GHOSTED_DAYS:-21}
+    volumes:
+      # Mount models directory for RejectGate and ONNX models
+      - ./models:/app/models:ro
     depends_on:
       db:
         condition: service_healthy
@@ -229,6 +232,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CLASSIFIER_SERVICE_URL=http://host.docker.internal:8003
       - GHOSTED_DAYS=${GHOSTED_DAYS:-21}
+    volumes:
+      # Mount models directory for RejectGate and ONNX models
+      - ./models:/app/models:ro
     depends_on:
       db:
         condition: service_healthy

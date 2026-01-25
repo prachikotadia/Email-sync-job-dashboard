@@ -1,0 +1,5 @@
+subject,snippet,from_domain,true_label
+"Application Status Update","Thank you for your interest in the position. Unfortunately, we have decided to move forward with other candidates.",recruiting.company.com,REJECTED
+"Next Steps - Interview","We'd like to schedule a phone interview with you. Please let us know your availability.",ats.com,NOT_REJECTED
+"Thank you for applying","We appreciate your application. We are currently reviewing all candidates and will be in touch soon.",jobs.company.com,NOT_REJECTED
+"Position Filled","The position has been filled. We appreciate your interest and wish you the best in your career journey.",notifications.lever.co,REJECTED

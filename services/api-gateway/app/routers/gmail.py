@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List
 import httpx
 import os
@@ -14,7 +14,29 @@ GMAIL_SERVICE_URL = os.getenv("GMAIL_SERVICE_URL", "http://gmail-connector-servi
 
 class SyncRequest(BaseModel):
     mode: Optional[str] = "full_history"  # "full_history" or "time_range"
-    time_range_months: Optional[int] = None  # For time_range mode: 3, 6, or 12
+    time_range_months: Optional[int] = None  # For time_range mode: 3, 6, 12, or 16
+    
+    @field_validator('time_range_months')
+    @classmethod
+    def validate_time_range_months(cls, v):
+        """Validate time_range_months is one of the allowed values."""
+        if v is not None:
+            valid_months = [3, 6, 12, 16]
+            if v not in valid_months:
+                raise ValueError(f"Invalid time_range_months: {v}. Must be one of: {valid_months}")
+        return v
+    
+    @model_validator(mode='after')
+    def validate_mode_and_months(self):
+        """Validate that mode and time_range_months are consistent."""
+        if self.time_range_months is not None:
+            # If time_range_months is provided, mode MUST be time_range
+            if self.mode != "time_range":
+                self.mode = "time_range"
+        elif self.mode == "time_range":
+            # Mode is time_range but no months provided - invalid
+            raise ValueError("time_range mode requires time_range_months parameter (3, 6, 12, or 16)")
+        return self
 
 @router.get("/status")
 async def get_status(token_data: dict = Depends(verify_token)):
@@ -65,25 +87,39 @@ async def start_sync(
         "user_email": user_email
     }
     
-    # Convert mode/time_range_months to range field (required by gmail-connector service)
+    # PERFECT TIME RANGE CONVERSION: Convert mode/time_range_months to range field
+    # CRITICAL: If time_range_months is provided, it MUST be used (strict enforcement)
     if request:
         mode = request.mode or "full_history"
         time_range_months = request.time_range_months
         
-        if mode == "full_history" or not time_range_months:
-            request_body["range"] = "FULL"
-        else:
-            # Validate time_range_months and convert to range format
+        # STRICT LOGIC: If time_range_months is provided, it MUST be time_range mode
+        if time_range_months is not None:
+            # Validate time_range_months is one of the allowed values
             valid_months = [3, 6, 12, 16]
             if time_range_months not in valid_months:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid time_range_months. Must be one of: {', '.join(map(str, valid_months))}"
+                    detail=f"Invalid time_range_months: {time_range_months}. Must be one of: {', '.join(map(str, valid_months))}"
                 )
+            # Force time_range mode when months are specified
+            mode = "time_range"
             request_body["range"] = f"{time_range_months}M"
+            logger.info(f"TIME RANGE SYNC: {time_range_months} months (strict enforcement)")
+        elif mode == "full_history" or not time_range_months:
+            # Full history mode
+            request_body["range"] = "FULL"
+            logger.info("FULL HISTORY SYNC: All emails (no time filter)")
+        else:
+            # Invalid state: mode is time_range but no months provided
+            raise HTTPException(
+                status_code=400,
+                detail="time_range mode requires time_range_months parameter (3, 6, 12, or 16)"
+            )
     else:
         # Default to full history if no request body provided
         request_body["range"] = "FULL"
+        logger.info("FULL HISTORY SYNC: Default (no request body)")
     
     url = f"{GMAIL_SERVICE_URL}/sync/start"
     logger.info(f"API Gateway: Calling Gmail service at {url} for user {user_email}, mode={request_body.get('mode')}")

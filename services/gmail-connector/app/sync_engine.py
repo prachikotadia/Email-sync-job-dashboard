@@ -55,14 +55,20 @@ class SyncEngine:
         user_id: int, 
         existing_history_id: str = None,
         mode: str = "full_history",  # "full_history" or "time_range"
-        time_range_months: int = None,  # For time_range mode: 3, 6, or 12
+        time_range_months: int = None,  # For time_range mode: 3, 6, 12, or 16
         checkpoint_token: str = None  # Resume from checkpoint
     ) -> AsyncIterator[Dict]:
         """
-        Sync ALL emails from Gmail (per spec requirements)
+        Sync emails from Gmail with STRICT time range enforcement.
         
-        Mode A - Full History: Fetch ALL emails in mailbox
-        Mode B - Time Range: Fetch emails after timestamp (3/6/12 months)
+        Mode A - Full History: Fetch ALL emails in mailbox (mode="full_history", time_range_months=None)
+        Mode B - Time Range: Fetch ONLY emails after timestamp (mode="time_range", time_range_months=3/6/12/16)
+        
+        CRITICAL TIME RANGE RULES:
+        - If time_range_months is provided, mode MUST be "time_range" (enforced)
+        - If mode is "time_range", time_range_months MUST be provided (3, 6, 12, or 16)
+        - Time range mode uses Gmail API 'after:' filter - ONLY emails after cutoff date are fetched
+        - NO fallback to full history when time range is specified
         
         NO subject queries - filtering happens AFTER fetching
         NO pagination limits - continues until nextPageToken is null
@@ -78,7 +84,7 @@ class SyncEngine:
             user_id: Database user ID
             existing_history_id: For incremental sync (if provided)
             mode: "full_history" or "time_range"
-            time_range_months: For time_range mode (3, 6, or 12 months)
+            time_range_months: For time_range mode (3, 6, 12, or 16 months) - REQUIRED if mode="time_range"
             checkpoint_token: Resume from this page token (for crash recovery)
         """
         total_scanned = 0
@@ -93,26 +99,89 @@ class SyncEngine:
         }
         skipped = 0
         
-        # Calculate start timestamp for time range mode
+        # PERFECT TIME RANGE LOGIC: Calculate EXACT cutoff date using proper month arithmetic
+        # If time_range_months is provided, mode MUST be "time_range" and we MUST filter by time
         start_timestamp_ms = None
-        if mode == "time_range" and time_range_months:
-            from datetime import timedelta
-            cutoff_date = datetime.now(timezone.utc) - timedelta(days=time_range_months * 30)
+        cutoff_date = None
+        
+        if time_range_months is not None:
+            # CRITICAL: If time_range_months is provided, enforce time_range mode
+            if mode != "time_range":
+                logger.warning(f"time_range_months={time_range_months} provided but mode={mode}. Forcing mode=time_range")
+                mode = "time_range"
+            
+            # Validate time_range_months is one of the allowed values
+            valid_months = [3, 6, 12, 16]
+            if time_range_months not in valid_months:
+                raise ValueError(f"Invalid time_range_months: {time_range_months}. Must be one of: {valid_months}")
+            
+            # PERFECT DATE CALCULATION: Use proper month arithmetic (not approximate days)
+            # Example: Jan 24, 2025 - 3 months = Oct 24, 2024 (exact date, handles month boundaries correctly)
+            from dateutil.relativedelta import relativedelta
+            now = datetime.now(timezone.utc)
+            
+            # Calculate exact cutoff date by subtracting months (handles month boundaries perfectly)
+            # relativedelta correctly handles: Jan 31 - 1 month = Dec 31, Feb 28 - 1 month = Jan 28, etc.
+            cutoff_date = now - relativedelta(months=time_range_months)
+            
+            # CRITICAL: Set to start of day (00:00:00 UTC) to include ALL emails from that day onwards
+            # Gmail API 'after:' filter: emails with internalDate >= timestamp are included
+            # So 'after:1729728000' (Oct 24, 2024 00:00:00 UTC) includes all emails from Oct 24, 2024 onwards
+            cutoff_date = cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
             start_timestamp_ms = int(cutoff_date.timestamp() * 1000)
-            logger.info(f"Time range mode: fetching emails after {cutoff_date} ({time_range_months} months)")
+            
+            # Calculate end date (today) for logging
+            end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
+            # Log exact date range for verification
+            now_str = now.strftime("%Y-%m-%d %H:%M:%S UTC")
+            cutoff_str = cutoff_date.strftime("%Y-%m-%d %H:%M:%S UTC")
+            end_str = end_date.strftime("%Y-%m-%d %H:%M:%S UTC")
+            logger.info(f"═══════════════════════════════════════════════════════════════")
+            logger.info(f"TIME RANGE MODE: Last {time_range_months} months (STRICT ENFORCEMENT)")
+            logger.info(f"═══════════════════════════════════════════════════════════════")
+            logger.info(f"  Current date/time: {now_str}")
+            logger.info(f"  Cutoff date:       {cutoff_str} (emails AFTER this date)")
+            logger.info(f"  End date:          {end_str}")
+            logger.info(f"  Date range:        {cutoff_date.strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}")
+            logger.info(f"  Gmail API filter:  after:{start_timestamp_ms // 1000} (Unix timestamp in seconds)")
+            logger.info(f"  Will sync ONLY emails with internalDate >= {cutoff_str}")
+            logger.info(f"  Will NOT fetch any emails before {cutoff_str}")
+            logger.info(f"═══════════════════════════════════════════════════════════════")
+        elif mode == "time_range":
+            # Mode is time_range but no months specified - this is invalid
+            raise ValueError("time_range mode requires time_range_months parameter (3, 6, 12, or 16)")
+        else:
+            # Full history mode - no time filtering
+            logger.info(f"FULL HISTORY MODE: Fetching ALL emails (no time filter)")
         
         try:
-            # CRITICAL: Fetch ALL messages WITHOUT subject query (per spec requirement 0)
-            # NO q parameter for subject/keyword filtering
-            # Filtering happens AFTER fetching in Stage 1
-            logger.info(f"Starting sync for user {user_id}: Mode={mode}, history_id={existing_history_id}")
+            # CRITICAL: Fetch messages with time filter if in time_range mode
+            # For time_range mode: Gmail API will ONLY return emails after start_timestamp_ms
+            # For full_history mode: No time filter, fetch everything
+            logger.info(f"Starting sync for user {user_id}: Mode={mode}, time_range_months={time_range_months}, history_id={existing_history_id}")
             
-            # Fetch ALL messages - pagination continues until nextPageToken is null
+            # Fetch messages with time filter (if in time_range mode)
+            # CRITICAL: start_timestamp_ms is set ONLY when time_range_months is provided
             messages, latest_history_id, next_page_token = self.gmail_client.get_all_messages(
                 history_id=existing_history_id,
                 start_timestamp_ms=start_timestamp_ms,
                 page_token=checkpoint_token
             )
+            
+            # SAFETY CHECK: Verify messages match time range (if time range is set)
+            if start_timestamp_ms and messages:
+                filtered_count = 0
+                for msg in messages:
+                    internal_date = int(msg.get('internalDate', 0))
+                    if internal_date < start_timestamp_ms:
+                        filtered_count += 1
+                        logger.warning(f"SAFETY CHECK: Message {msg.get('id')} has internalDate {internal_date} < cutoff {start_timestamp_ms} - this should not happen with Gmail API filter!")
+                
+                if filtered_count > 0:
+                    logger.error(f"SAFETY CHECK FAILED: {filtered_count} messages found outside time range despite Gmail API filter!")
+                else:
+                    logger.info(f"SAFETY CHECK PASSED: All {len(messages)} messages are within time range")
             self.latest_history_id = latest_history_id
             total_fetched = len(messages)
             total_scanned = total_fetched  # For full history, scanned = fetched
@@ -165,12 +234,14 @@ class SyncEngine:
             logger.info(f"Stage 1: Found {candidate_job_emails} candidate job emails (after skipping {len(existing_message_ids)} already processed)")
             
             # Stage 2: High Precision - Classify and save (batch processing for speed)
+            # OPTIMIZED: Increased batch sizes for better performance
             # STEP 10: Batch classify (16-64) for ONNX speed
             # Optimized batch size: 16-64 emails per batch for ONNX inference speed
-            # Smaller batches = lower memory usage, better cancellation responsiveness
-            onnx_batch_size = int(os.getenv("ONNX_BATCH_SIZE", "32"))  # Default: 32 (between 16-64)
+            # Larger batches = faster processing, better GPU utilization
+            onnx_batch_size = int(os.getenv("ONNX_BATCH_SIZE", "48"))  # Default: 48 (optimized for speed)
             onnx_batch_size = max(16, min(64, onnx_batch_size))  # Clamp between 16-64
-            yield_batch_size = 50  # Yield progress every 50 emails
+            yield_batch_size = 25  # Yield progress every 25 emails (more frequent for smoother UI)
+            db_commit_batch_size = 20  # Commit to DB every 20 emails (reduced for better performance)
             batch_count = 0
             last_processed_message_id = None
             last_processed_internal_date = None
@@ -197,6 +268,90 @@ class SyncEngine:
                         skipped += 1
                         continue
                     
+                    # REJECTGATE: Fast rejection detection (STRICT PRIORITY - runs first)
+                    # If RejectGate says rejected, set status=REJECTED and skip full classification pipeline
+                    decision_path = []
+                    reject_gate_result = None
+                    try:
+                        from app.services.reject_gate import predict_reject_gate, is_initialized
+                        if is_initialized():
+                            reject_gate_result = predict_reject_gate(
+                                subject=application_data.get("subject", ""),
+                                snippet=application_data.get("snippet", ""),
+                                from_domain=application_data.get("sender_domain", "")
+                            )
+                            if reject_gate_result.get("is_rejected", False):
+                                # RejectGate says REJECTED - set status and skip full classification
+                                from app.hybrid_classifier import ClassificationStatus, ClassificationResult, ClassificationSignals
+                                decision_path.append(f"reject_gate:rejected:{reject_gate_result['p_rejected']:.3f}")
+                                classification_result = ClassificationResult(
+                                    status=ClassificationStatus.REJECTED,
+                                    confidence=reject_gate_result["p_rejected"],
+                                    signals=ClassificationSignals(),
+                                    explanation=reject_gate_result["reason"],
+                                    version="reject_gate"
+                                )
+                                category = "REJECTED"
+                                classification_trace = {
+                                    "final_status": "REJECTED",
+                                    "confidence": reject_gate_result["p_rejected"],
+                                    "reason": reject_gate_result["reason"],
+                                    "source": "REJECTGATE",
+                                    "needs_review": False,
+                                    "decision_path": decision_path
+                                }
+                                
+                                # Get thread ID before saving
+                                thread_id = message.get('threadId')
+                                
+                                # Save immediately and skip rest of classification pipeline
+                                # OPTIMIZATION: RejectGate fast path - commit immediately for speed
+                                try:
+                                    self._save_application(
+                                        user_id,
+                                        message_id,
+                                        application_data,
+                                        category,
+                                        thread_id,
+                                        classification_result,
+                                        classification_trace
+                                    )
+                                    # Fast path: commit immediately for RejectGate (critical for speed)
+                                    self.db.commit()
+                                    classified["REJECTED"] += 1
+                                    logger.debug(f"RejectGate: Message {message_id} marked as REJECTED (p={reject_gate_result['p_rejected']:.3f})")
+                                except Exception as save_error:
+                                    logger.error(f"Failed to save RejectGate result for message {message_id}: {save_error}")
+                                    self.db.rollback()
+                                    skipped += 1
+                                
+                                # Yield progress update
+                                yield {
+                                    "phase": "classifying",
+                                    "message": f"Processing email {idx + 1}/{len(candidate_emails)}",
+                                    "counts": {
+                                        "total_estimated": len(candidate_emails),
+                                        "listed": len(candidate_emails),
+                                        "fetched": len(candidate_emails),
+                                        "parsed": idx + 1,
+                                        "classified": sum(classified.values()),
+                                        "saved": sum(classified.values()),
+                                        "skipped": skipped
+                                    },
+                                    "email_id": message_id,
+                                    "email_entry": {
+                                        "id": message_id,
+                                        "company": application_data.get("company_name", "Unknown Company"),
+                                        "snippet": application_data.get("snippet", "")[:100],
+                                        "category": "REJECTED",
+                                        "subject": application_data.get("subject", "")[:80],
+                                    }
+                                }
+                                continue  # Skip rest of classification pipeline
+                    except Exception as e:
+                        # RejectGate failed - log and continue with normal classification
+                        logger.debug(f"RejectGate check failed: {e}. Continuing with normal classification.")
+                    
                     # Check for attachments (for Layer 4: Structural Parsing)
                     # WHY: Attachments are strong signals (offer letters, calendar files)
                     application_data["has_attachment"] = self._has_attachments(message)
@@ -207,17 +362,33 @@ class SyncEngine:
                     # Get thread ID from message
                     thread_id = message.get('threadId')
                     
-                    # STEP 10: Build thread summary for ONNX classifier (batch processing)
+                    # STEP 10: Build thread summary for ONNX classifier (OPTIMIZED with caching)
+                    # OPTIMIZATION: Cache thread summaries to avoid redundant API calls
                     thread_summary = ""
                     if thread_id and self.gmail_client:
-                        try:
-                            # Get thread for summary
-                            thread = self.gmail_client.get_thread(thread_id)
-                            if thread:
-                                messages = thread.get('messages', [])
-                                thread_summary = f"Thread has {len(messages)} messages"
-                        except Exception as e:
-                            logger.debug(f"Failed to get thread summary: {e}")
+                        # Use thread_id as cache key (simple in-memory cache for this batch)
+                        if not hasattr(self, '_thread_cache'):
+                            self._thread_cache = {}
+                        
+                        if thread_id in self._thread_cache:
+                            thread_summary = self._thread_cache[thread_id]
+                        else:
+                            try:
+                                # Get thread for summary (only if not cached)
+                                thread = self.gmail_client.get_thread(thread_id)
+                                if thread:
+                                    messages = thread.get('messages', [])
+                                    thread_summary = f"Thread has {len(messages)} messages"
+                                    self._thread_cache[thread_id] = thread_summary
+                                    # Limit cache size to prevent memory issues (keep last 1000)
+                                    if len(self._thread_cache) > 1000:
+                                        # Remove oldest entries (simple FIFO)
+                                        oldest_key = next(iter(self._thread_cache))
+                                        del self._thread_cache[oldest_key]
+                            except Exception as e:
+                                logger.debug(f"Failed to get thread summary: {e}")
+                                # Cache empty result to avoid retrying failed calls
+                                self._thread_cache[thread_id] = ""
                     
                     # STEP 10: Add to batch for ONNX classification (16-64 emails at a time)
                     email_batch.append({
@@ -256,12 +427,15 @@ class SyncEngine:
                             logger.debug(f"ONNX classification failed: {e}, falling back to hybrid classifier")
                             onnx_result = None
                     
-                    # STEP 10: Track decision_path for full traceability
-                    decision_path = []
+                    # STEP 10: Track decision_path for full traceability (already initialized in RejectGate check)
+                    # decision_path is already initialized above if RejectGate didn't reject
+                    if 'decision_path' not in locals():
+                        decision_path = []
                     
                     # Use ONNX result if available, otherwise use hybrid classifier
                     # STEP 8: Confidence threshold rules + guardrails
-                    confidence_threshold = float(os.getenv("ONNX_CONFIDENCE_THRESHOLD", "0.75"))
+                    # OPTIMIZATION: Slightly lower threshold for better accuracy (reduce fallbacks)
+                    confidence_threshold = float(os.getenv("ONNX_CONFIDENCE_THRESHOLD", "0.70"))  # Lowered from 0.75 to 0.70
                     needs_review = False
                     use_onnx_result = False
                     
@@ -449,6 +623,7 @@ class SyncEngine:
                     
                     # IDEMPOTENCY: Save to database (upsert logic in _save_application prevents duplicates)
                     # CRITICAL: Track if save succeeded to ensure classified count matches saved count
+                    # OPTIMIZATION: Batch database commits for better performance
                     try:
                         self._save_application(
                             user_id,
@@ -460,8 +635,14 @@ class SyncEngine:
                             classification_trace
                         )
                         save_succeeded = True
+                        
+                        # OPTIMIZATION: Batch commit to DB every N emails (reduces transaction overhead)
+                        # Commit immediately for RejectGate (fast path), batch commit for others
+                        if category == "REJECTED" or processed_count % db_commit_batch_size == 0:
+                            self.db.commit()
                     except Exception as save_error:
                         logger.error(f"Failed to save application for message {message_id}: {save_error}")
+                        self.db.rollback()
                         save_succeeded = False
                         skipped += 1
                         continue  # Skip if save failed
@@ -509,10 +690,17 @@ class SyncEngine:
                         "last_processed_internal_date": last_processed_internal_date,  # For checkpoint persistence
                     }
                     
-                    # Process remaining batch if any
+                    # Process remaining batch if any (OPTIMIZATION: Process before yielding)
                     if len(email_batch) > 0:
                         batch_results.update(self._classify_batch_onnx(email_batch))
                         email_batch = []
+                    
+                    # OPTIMIZATION: Final commit before yielding progress
+                    if processed_count > 0:
+                        try:
+                            self.db.commit()
+                        except Exception as commit_error:
+                            logger.warning(f"Error committing before yield: {commit_error}")
                     
                     # Reset batch count after yielding (we still process in batches for efficiency)
                     if batch_count >= yield_batch_size:

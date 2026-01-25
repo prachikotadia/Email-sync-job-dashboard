@@ -53,6 +53,14 @@ async def startup():
     init_db()
     logger.info("Database initialized")
     
+    # Initialize RejectGate (fast rejection detection)
+    try:
+        from app.services.reject_gate import init_reject_gate
+        init_reject_gate()
+        logger.info("RejectGate initialized successfully")
+    except Exception as e:
+        logger.warning(f"Failed to initialize RejectGate: {e}. RejectGate disabled.")
+    
     # Initialize ONNX classifier if enabled
     use_onnx = os.getenv("USE_ONNX_INFERENCE", "false").lower() == "true"
     if use_onnx:

@@ -361,16 +361,27 @@
   gap: 8px;
   margin-bottom: 8px;
   word-break: break-word;
+  align-items: flex-start;
 }
 
 .sync-log-time {
   color: var(--text-muted);
   flex-shrink: 0;
+  font-size: 0.8125rem;
+}
+
+.sync-log-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 0.875rem;
+  margin-top: 2px;
 }
 
 .sync-log-message {
   color: var(--text-primary);
   flex: 1;
+  line-height: 1.5;
 }
 
 [data-theme="light"] .sync-log-time {

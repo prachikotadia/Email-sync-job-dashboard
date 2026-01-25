@@ -259,11 +259,34 @@ async def run_sync_with_progress(job_id: uuid.UUID, user_id: uuid.UUID, user_ema
         last_rate_calc_time = datetime.now(timezone.utc)
         
         # Get mode from checkpoint (stored when job was created)
+        # STRICT: Ensure time_range_months is preserved and mode is correct
         checkpoint = sync_job.checkpoint or {}
         mode = checkpoint.get("mode", "full_history")
         time_range_months = checkpoint.get("time_range_months")
         checkpoint_token = checkpoint.get("page_token")  # For resume (if crash occurred mid-pagination)
         checkpoint_state_str = checkpoint.get("sync_state")  # Resume from last state
+        
+        # STRICT VALIDATION: If time_range_months is set, mode MUST be "time_range"
+        if time_range_months is not None:
+            if mode != "time_range":
+                logger.warning(f"Checkpoint has time_range_months={time_range_months} but mode={mode}. Correcting to time_range mode.")
+                mode = "time_range"
+            # Validate time_range_months is valid
+            valid_months = [3, 6, 12, 16]
+            if time_range_months not in valid_months:
+                error_msg = f"Invalid time_range_months in checkpoint: {time_range_months}. Must be one of: {valid_months}"
+                logger.error(error_msg)
+                add_log(db, job_id, f"ERROR: {error_msg}", "error")
+                raise ValueError(error_msg)
+            logger.info(f"TIME RANGE SYNC: Will sync ONLY last {time_range_months} months (strict enforcement)")
+        elif mode == "time_range":
+            # Mode is time_range but no months - this is invalid
+            error_msg = "time_range mode requires time_range_months parameter (3, 6, 12, or 16)"
+            logger.error(error_msg)
+            add_log(db, job_id, f"ERROR: {error_msg}", "error")
+            raise ValueError(error_msg)
+        else:
+            logger.info(f"FULL HISTORY SYNC: Will sync ALL emails (no time filter)")
         
         # Resume from last state if checkpoint exists
         if checkpoint_state_str:
@@ -364,6 +387,29 @@ async def run_sync_with_progress(job_id: uuid.UUID, user_id: uuid.UUID, user_ema
                     email_entry = progress.get("email_entry")
                     email_id = email_entry.get("id") if email_entry else None
                     
+                    # Create detailed log message for real-time UI display
+                    log_message = None
+                    log_type = "info"
+                    
+                    if phase == SyncPhase.LISTING:
+                        log_message = f"📋 Scanning Gmail inbox... Found {total_scanned} emails so far"
+                        log_type = "info"
+                    elif phase == SyncPhase.FETCHING:
+                        log_message = f"📥 Fetching email {total_fetched}/{total_scanned} from Gmail..."
+                        log_type = "info"
+                    elif phase == SyncPhase.CLASSIFYING:
+                        if email_entry:
+                            company = email_entry.get("company", "Unknown Company")
+                            category = email_entry.get("category", "Unknown")
+                            log_message = f"🤖 Classifying email: {company} → {category}"
+                            log_type = "success" if category else "info"
+                        else:
+                            log_message = f"🤖 Classifying emails... {processed_count}/{candidate_job_emails} processed"
+                            log_type = "info"
+                    elif phase == SyncPhase.SAVING:
+                        log_message = f"💾 Saving email to database... ({processed_count} saved)"
+                        log_type = "success"
+                    
                     event = create_progress_event(
                         sync_id=str(job_id),
                         phase=phase,
@@ -375,7 +421,9 @@ async def run_sync_with_progress(job_id: uuid.UUID, user_id: uuid.UUID, user_ema
                             "page_token": progress.get("page_token"),
                             "history_id": sync_state.gmail_history_id
                         },
-                        email_id=email_id  # Include email_id for per-email tracking
+                        email_id=email_id,  # Include email_id for per-email tracking
+                        log_message=log_message,  # Detailed log message for UI
+                        log_type=log_type  # Log type for UI styling
                     )
                     publish_progress_event(event)
                     

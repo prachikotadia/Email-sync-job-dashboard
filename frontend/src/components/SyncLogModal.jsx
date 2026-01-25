@@ -115,8 +115,19 @@ export default function SyncLogModal({ progress, isRunning, onClose, onCancel, j
     ? applicationsFound 
     : Object.values(classified).reduce((sum, val) => sum + (val || 0), 0)
   
-  // Use real logs from backend
+  // Use real logs from backend + real-time events
   const backendLogs = progress?.logs || []
+  
+  // Extract real-time log from latest event if available
+  const latestEvent = progress?.lastEvent || progress
+  const realtimeLog = latestEvent?.log_message ? {
+    time: latestEvent.ts ? new Date(latestEvent.ts) : new Date(),
+    message: latestEvent.log_message,
+    type: latestEvent.log_type || latestEvent.level || 'info',
+    email_id: latestEvent.email_id,
+    retry_count: latestEvent.retry_count,
+    retry_after_seconds: latestEvent.retry_after_seconds
+  } : null
   
   // Convert backend logs to display format (keep last 200)
   // Include email_id, retry_count, and retry_after_seconds from progressEvent logs
@@ -128,6 +139,11 @@ export default function SyncLogModal({ progress, isRunning, onClose, onCancel, j
     retry_count: log.retry_count,  // Include retry count
     retry_after_seconds: log.retry_after_seconds  // Include backoff duration
   }))
+  
+  // Add real-time log at the end if available and not already in logs
+  if (realtimeLog && (!logEntries.length || logEntries[logEntries.length - 1].message !== realtimeLog.message)) {
+    logEntries.push(realtimeLog)
+  }
 
   // Format email entries for display - match image format: "Hire - [snippet] - [category]"
   const formatEmailEntry = (entry) => {
@@ -361,29 +377,50 @@ export default function SyncLogModal({ progress, isRunning, onClose, onCancel, j
                 <span className="sync-log-message">Initializing sync...</span>
               </div>
             ) : (
-              logEntries.map((entry, index) => (
-                <div key={index} className={`sync-log-entry sync-log-${entry.type || 'info'}`}>
-                  <span className="sync-log-time">[{formatTime(entry.time)}]</span>
-                  <span className="sync-log-message">
-                    {entry.message}
-                    {entry.retry_count && entry.retry_count > 0 && (
-                      <span className="sync-log-retry-info" title={`Retry attempt ${entry.retry_count}`}>
-                        {' '}(Retry {entry.retry_count})
-                      </span>
-                    )}
-                    {entry.retry_after_seconds && (
-                      <span className="sync-log-retry-info" title={`Retrying in ${entry.retry_after_seconds}s`}>
-                        {' '}(Retry in {Math.round(entry.retry_after_seconds)}s)
-                      </span>
-                    )}
-                  </span>
-                  {entry.email_id && (
-                    <span className="sync-log-email-id" title={`Gmail Message ID: ${entry.email_id}`}>
-                      {entry.email_id.substring(0, 8)}...
+              logEntries.map((entry, index) => {
+                // Determine icon/emoji based on log type and message content
+                let icon = ''
+                if (entry.type === 'success') {
+                  icon = '✓'
+                } else if (entry.type === 'error' || entry.type === 'warning') {
+                  icon = '⚠'
+                } else if (entry.message.includes('Scanning') || entry.message.includes('📋')) {
+                  icon = '📋'
+                } else if (entry.message.includes('Fetching') || entry.message.includes('📥')) {
+                  icon = '📥'
+                } else if (entry.message.includes('Classifying') || entry.message.includes('🤖')) {
+                  icon = '🤖'
+                } else if (entry.message.includes('Saving') || entry.message.includes('💾')) {
+                  icon = '💾'
+                } else {
+                  icon = '•'
+                }
+                
+                return (
+                  <div key={index} className={`sync-log-entry sync-log-${entry.type || 'info'}`}>
+                    <span className="sync-log-time">[{formatTime(entry.time)}]</span>
+                    <span className="sync-log-icon">{icon}</span>
+                    <span className="sync-log-message">
+                      {entry.message}
+                      {entry.retry_count && entry.retry_count > 0 && (
+                        <span className="sync-log-retry-info" title={`Retry attempt ${entry.retry_count}`}>
+                          {' '}(Retry {entry.retry_count})
+                        </span>
+                      )}
+                      {entry.retry_after_seconds && (
+                        <span className="sync-log-retry-info" title={`Retrying in ${entry.retry_after_seconds}s`}>
+                          {' '}(Retry in {Math.round(entry.retry_after_seconds)}s)
+                        </span>
+                      )}
                     </span>
-                  )}
-                </div>
-              ))
+                    {entry.email_id && (
+                      <span className="sync-log-email-id" title={`Gmail Message ID: ${entry.email_id}`}>
+                        {entry.email_id.substring(0, 8)}...
+                      </span>
+                    )}
+                  </div>
+                )
+              })
             )}
             {status === 'running' && (
               <div className="sync-log-entry sync-log-info">
