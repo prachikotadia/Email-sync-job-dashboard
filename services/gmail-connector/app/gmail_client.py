@@ -6,6 +6,7 @@ from googleapiclient.errors import HttpError
 from typing import List, Dict, Optional
 from datetime import datetime, timezone
 import logging
+import os
 import json
 import time
 import random
@@ -316,18 +317,18 @@ class GmailClient:
                     # NOTE: This is the ONLY acceptable use of 'q' parameter (time-based, not subject/keyword)
                     if start_timestamp_ms:
                         # Convert milliseconds to seconds for Gmail API 'after:' filter
-                        # Gmail API 'after:' filter: returns emails where internalDate >= timestamp
-                        # Example: 'after:1729728000' returns all emails with internalDate >= Oct 24, 2024 00:00:00 UTC
-                        # NO emails before this timestamp will be included (strict enforcement)
                         timestamp_seconds = start_timestamp_ms // 1000
-                        list_params['q'] = f'after:{timestamp_seconds}'
+                        # Optional safe exclusions to reduce garbage (firewall still runs on all fetched)
+                        exclude_promos = os.environ.get("GMAIL_EXCLUDE_PROMOS", "true").lower() == "true"
+                        q_parts = [f"after:{timestamp_seconds}"]
+                        if exclude_promos:
+                            q_parts.append("-category:promotions")
+                            q_parts.append("-category:social")
+                        list_params["q"] = " ".join(q_parts)
                         
-                        # Log the exact filter being used
                         from datetime import datetime, timezone
                         filter_date = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
-                        logger.info(f"TIME RANGE FILTER ACTIVE: 'after:{timestamp_seconds}' ({filter_date.strftime('%Y-%m-%d %H:%M:%S UTC')})")
-                        logger.info(f"  → Will ONLY fetch emails with internalDate >= {filter_date.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-                        logger.info(f"  → Will NOT fetch any emails before this timestamp")
+                        logger.info(f"TIME RANGE FILTER ACTIVE: q={list_params['q']!r} ({filter_date.strftime('%Y-%m-%d %H:%M:%S UTC')})")
                     
                     # Use retry logic for list call
                     def list_page():

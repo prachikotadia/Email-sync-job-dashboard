@@ -58,6 +58,8 @@ def search_applications(
     
     # Base query filtered by user
     base_query = db.query(Application).filter(Application.user_id == user_id)
+    base_query = base_query.filter(Application.category.notin_(["FILTERED", "IGNORED"]))
+    base_query = base_query.filter((Application.is_job_email == True) | (Application.is_job_email.is_(None)))
     
     # Build search conditions with ranking
     # Use CASE statements for ranking (higher score = better match)
@@ -196,6 +198,8 @@ def search_applications_fuzzy(
     try:
         # Try to use trigram similarity
         base_query = db.query(Application).filter(Application.user_id == user_id)
+        base_query = base_query.filter(Application.category.notin_(["FILTERED", "IGNORED"]))
+        base_query = base_query.filter((Application.is_job_email == True) | (Application.is_job_email.is_(None)))
         
         # Use similarity function for fuzzy matching
         company_similarity = func.similarity(func.lower(Application.company_name), query_clean).label('company_sim')

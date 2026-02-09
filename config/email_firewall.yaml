@@ -1,0 +1,171 @@
+# Email Firewall Configuration
+# This file defines rules to filter out non-job emails before classification
+# Rules are evaluated in order: DENY first, then ALLOW
+
+firewall:
+  # DENY RULES - If any deny rule matches, email is blocked immediately
+  deny:
+    # Exact domain blocks (and all subdomains)
+    domains_exact:
+      - render.com
+      - netlify.com
+      - vercel.com
+      - railway.app
+      - heroku.com
+      - accounts.google.com
+      - github.com
+      - gitlab.com
+      - bitbucket.org
+      - atlassian.net
+      - zendesk.com
+      - intercom-mail.com
+      - helpscout.net
+      - mailchimp.com
+      - sendgrid.net
+      - stripe.com
+      - paypal.com
+      - auth0.com
+      - okta.com
+    
+    # Substring domain blocks (matches if domain contains these strings)
+    domains_substring:
+      - auth
+      - login
+      - security
+      - billing
+      - receipt
+      - invoice
+      - newsletter
+      - promo
+      - marketing
+      - support
+      - noreply
+      - no-reply
+      - notifications
+      - alerts
+    
+    # Keyword blocks (case-insensitive, matches in subject OR snippet)
+    keywords:
+      # OTP / Verification / Login
+      - "otp"
+      - "one-time password"
+      - "verification code"
+      - "security code"
+      - "verify your email"
+      - "confirm your email"
+      - "email verification"
+      - "new sign-in"
+      - "new login"
+      - "suspicious sign-in"
+      - "security alert"
+      - "password reset"
+      - "reset your password"
+      - "two-step"
+      - "2fa"
+      - "two factor"
+      
+      # Deploy/Build/Hosting
+      - "deployment"
+      - "deploy"
+      - "build succeeded"
+      - "build failed"
+      - "your site is live"
+      - "deployment successful"
+      - "deployment failed"
+      
+      # Promos/Ads/Newsletters
+      - "unsubscribe"
+      - "sale"
+      - "discount"
+      - "limited time"
+      - "promotion"
+      - "newsletter"
+      - "weekly update"
+      - "recommended for you"
+      - "special offer"
+      
+      # Billing/Receipts
+      - "invoice"
+      - "receipt"
+      - "payment"
+      - "billing"
+      - "charge"
+      - "subscription"
+      - "payment received"
+      - "payment failed"
+      
+      # Support Systems
+      - "ticket"
+      - "case"
+      - "support request"
+      - "we received your request"
+      - "incident"
+      - "status update"
+      - "postmortem"
+      - "support ticket"
+  
+  # ALLOW RULES - Only emails with at least one strong allow signal pass through
+  allow:
+    # ATS domains (strong job signal)
+    ats_domains:
+      - greenhouse.io
+      - lever.co
+      - workday.com
+      - icims.com
+      - smartrecruiters.com
+      - taleo.net
+      - successfactors.com
+      - ashbyhq.com
+      - jobvite.com
+      - brassring.com
+    
+    # Strong job keywords (subject or snippet)
+    job_keywords:
+      - "application"
+      - "candidate"
+      - "position"
+      - "role"
+      - "requisition"
+      - "job id"
+      - "career"
+      - "careers"
+      - "hiring team"
+      - "recruiting"
+      - "interview"
+      - "offer"
+      - "rejection"
+      - "thank you for applying"
+      - "application update"
+      - "we regret to inform you"
+      - "congratulations"
+      - "next steps"
+    
+    # Sender local part patterns (email prefix patterns)
+    sender_patterns:
+      - "recruiting@"
+      - "talent@"
+      - "careers@"
+      - "jobs@"
+      - "ats@"
+      - "noreply@workday"
+      - "noreply@greenhouse"
+      - "noreply@lever"
+      - "hiring@"
+      - "hr@"
+  
+  # STRONG JOB OVERRIDE - Allows emails that match deny rules IF they contain unambiguous job decision phrases
+  strong_job_override:
+    # Phrases that indicate this is definitely a job email (even if it matches deny rules)
+    phrases:
+      - "we regret to inform you regarding your application"
+      - "regarding your application"
+      - "your application for"
+      - "application status"
+      - "interview scheduled"
+      - "offer letter"
+      - "job offer"
+      - "position at"
+      - "role at"
+    
+    # Must also contain at least one job term
+    require_job_term: true

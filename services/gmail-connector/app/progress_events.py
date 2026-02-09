@@ -39,6 +39,7 @@ class SyncPhase:
     FAILED = "failed"
     CANCELED = "canceled"
     RATE_LIMITED = "rate_limited"  # Job paused due to Gmail API rate limits
+    FILTERED_NON_JOB = "filtered_non_job"  # Email filtered by firewall
 
 # Event levels
 class EventLevel:
@@ -93,7 +94,9 @@ def create_progress_event(
             "classified": 0,
             "saved": 0,
             "skipped": 0,
-            "failed": 0
+            "failed": 0,
+            "firewall_denied": 0,
+            "firewall_allowed": 0
         },
         "rate": rate or {
             "emails_per_sec": 0.0,

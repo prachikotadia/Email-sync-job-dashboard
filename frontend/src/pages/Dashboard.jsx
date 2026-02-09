@@ -766,8 +766,10 @@ function Dashboard() {
                     >
                       <div className="activity-item-icon">{statusIcon}</div>
                       <div className="activity-item-info">
-                        <div className="activity-company">{app.company || 'Unknown'}</div>
-                        <div className="activity-role">{app.role || ''}</div>
+                        <div className="activity-company">
+                          {app.company || (app.company_domain ? `${app.company_domain} (Unknown company)` : 'Unknown company')}
+                        </div>
+                        <div className="activity-role">{app.role_title || app.role || ''}</div>
                       </div>
                       <div className={`activity-status activity-status-${(app.status || '').toLowerCase()}`}>
                         {app.status || '—'}

@@ -90,6 +90,8 @@ def advanced_search_applications(
     
     # Base query filtered by user
     base_query = db.query(Application).filter(Application.user_id == user_id)
+    base_query = base_query.filter(Application.category.notin_(["FILTERED", "IGNORED"]))
+    base_query = base_query.filter((Application.is_job_email == True) | (Application.is_job_email.is_(None)))
     
     # Global search query (searches across multiple fields)
     if query and query.strip():

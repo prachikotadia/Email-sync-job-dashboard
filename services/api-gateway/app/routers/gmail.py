@@ -319,6 +319,32 @@ async def stop_sync(sync_id: str, token_data: dict = Depends(verify_token)):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
 
+@router.post("/backfill/company")
+async def backfill_company(
+    user_id: Optional[str] = Query(None, description="User email; if omitted, backfill for current user"),
+    token_data: dict = Depends(verify_token)
+):
+    """
+    Backfill company_name (and company_source, company_confidence, company_debug)
+    for applications that have Unknown/Unknown Company. Uses subject, snippet, from_email.
+    """
+    try:
+        params = {}
+        if user_id:
+            params["user_id"] = user_id
+        else:
+            params["user_id"] = token_data.get("sub")
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{GMAIL_SERVICE_URL}/backfill/company",
+                params=params
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail="Gmail service unavailable")
+
+
 @router.get("/applications")
 async def get_applications(
     search: str = Query(None),
@@ -565,5 +591,31 @@ async def get_stats(token_data: dict = Depends(verify_token)):
             )
             response.raise_for_status()
             return response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")
+
+@router.get("/debug/email/{message_id}")
+async def debug_email(
+    message_id: str,
+    token_data: dict = Depends(verify_token)
+):
+    """
+    Debug endpoint to inspect firewall decision and classification for an email.
+    Returns firewall decision, matched rules, and classification outputs.
+    """
+    user_id = token_data.get("sub")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{GMAIL_SERVICE_URL}/debug/email/{message_id}",
+                params={"user_id": user_id}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Email not found")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Failed to get debug info: {str(e)}")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=503, detail=f"Gmail service unavailable: {str(e)}")

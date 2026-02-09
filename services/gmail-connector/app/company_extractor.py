@@ -66,7 +66,7 @@ class CompanyExtractor:
             return company, source, confidence
         
         # Layer 5: Fallback (LAST RESORT - NEVER returns None)
-        company, source, confidence = self._extract_fallback(from_email, email_id)
+        company, source, confidence = self._extract_fallback(from_email, email_id, subject=subject, snippet=snippet)
         logger.warning(f"[CompanyExtract] email_id={email_id} source={source} company={company} confidence={confidence:.2f} (FALLBACK USED)")
         return company, source, confidence
     
@@ -291,11 +291,14 @@ class CompanyExtractor:
         
         return None, "SIGNATURE", 0.0
     
-    def _extract_fallback(self, from_email: str, email_id: str) -> Tuple[str, str, float]:
+    def _extract_fallback(
+        self, from_email: str, email_id: str, subject: str = "", snippet: str = ""
+    ) -> Tuple[str, str, float]:
         """
-        Layer 5: Fallback - MUST return a valid company name (never None)
+        Layer 5: Fallback - MUST return a valid company name (never None).
+        Tries: display name, domain, subject/snippet patterns, then "Unknown Company".
         """
-        # Try sender display name
+        # Try sender display name (e.g. "Acme Corp <noreply@acme.com>")
         if '<' in from_email and '>' in from_email:
             name_part = from_email.split('<')[0].strip().strip('"').strip("'")
             if name_part and '@' not in name_part and len(name_part) > 2:
@@ -303,15 +306,43 @@ class CompanyExtractor:
                 if normalized:
                     return normalized, "FALLBACK_SENDER", 0.4
         
-        # Try domain as last resort
+        # Try domain (use registrable part for subdomains: mail.company.com -> company)
         if '@' in from_email:
             domain = from_email.split('@')[1].lower()
-            domain_parts = domain.split('.')
+            domain_parts = [p for p in domain.split('.') if p]
             if domain_parts and domain_parts[0] not in self.ignore_domains:
-                company = domain_parts[0]
-                normalized = self._normalize(company)
+                # Prefer first meaningful part; for mail.company.com use company
+                generic = {'mail', 'email', 'www', 'web', 'smtp', 'mx', 'hr', 'careers', 'jobs', 'noreply', 'no-reply'}
+                company_part = None
+                for part in domain_parts:
+                    if part not in generic and part not in self.ignore_domains and len(part) > 1:
+                        company_part = part
+                        break
+                if not company_part:
+                    company_part = domain_parts[0]
+                normalized = self._normalize(company_part)
                 if normalized:
                     return normalized, "FALLBACK_DOMAIN", 0.3
+        
+        # Try subject/snippet for " at Company" or "Company -" before giving up
+        for text in (subject, snippet):
+            if not text:
+                continue
+            patterns = [
+                r'\bat\s+([A-Z][a-zA-Z0-9\s&.-]{2,30}?)(?:\s+[-–—|]|\s*$|,)',
+                r'(?:position|role|job|application)\s+(?:at|with)\s+([A-Z][a-zA-Z0-9\s&.-]{2,30}?)(?:\s+[-–—|]|\s*$|,)',
+                r'([A-Z][a-zA-Z0-9\s&.-]{2,30}?)\s+[-–—]\s+(?:Software|Engineer|Role|Interview)',
+                r'(?:from|@)\s+([A-Z][a-zA-Z0-9\s&.-]{2,30}?)(?:\s+[-–—|]|\s*$|,)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, text)
+                if match:
+                    company = match.group(1).strip()
+                    company = re.sub(r'\s+(Inc|LLC|Ltd|Corp|Careers|Jobs|Hiring)$', '', company, flags=re.IGNORECASE)
+                    if len(company) > 2 and company.lower() not in ('the', 'and', 'for', 'with', 'from', 'at', 'your'):
+                        normalized = self._normalize(company)
+                        if normalized:
+                            return normalized, "FALLBACK_SUBJECT", 0.25
         
         # Absolute last resort - but NEVER return None
         return "Unknown Company", "FALLBACK_UNKNOWN", 0.1

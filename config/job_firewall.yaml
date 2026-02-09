@@ -1,0 +1,125 @@
+# Job Email Firewall - Deny-first, allow-only. Blocks non-job emails BEFORE any classifier.
+# Non-negotiable: Render, Netlify, Google auth, OTP, Indeed/BuiltIn job alerts, promos never enter pipeline.
+
+job_firewall:
+  # DENY: domains (exact + suffix match). Category assigned by list.
+  deny:
+    domains:
+      # Security/Auth
+      - { value: "accounts.google.com", category: "NON_JOB_AUTH" }
+      - { value: "google.com", category: "NON_JOB_AUTH" }
+      # Deploy/DevOps
+      - { value: "render.com", category: "NON_JOB_DEVOPS" }
+      - { value: "netlify.com", category: "NON_JOB_DEVOPS" }
+      - { value: "vercel.com", category: "NON_JOB_DEVOPS" }
+      - { value: "railway.app", category: "NON_JOB_DEVOPS" }
+      - { value: "heroku.com", category: "NON_JOB_DEVOPS" }
+      # Dev platforms
+      - { value: "github.com", category: "NON_JOB_DEVOPS" }
+      - { value: "gitlab.com", category: "NON_JOB_DEVOPS" }
+      - { value: "bitbucket.org", category: "NON_JOB_DEVOPS" }
+      # Job-board newsletters/recommendations (block by default)
+      - { value: "indeed.com", category: "NON_JOB_ALERT" }
+      - { value: "builtin.com", category: "NON_JOB_ALERT" }
+      # Marketing
+      - { value: "mailchimp.com", category: "NON_JOB_PROMO" }
+      - { value: "sendgrid.net", category: "NON_JOB_PROMO" }
+      - { value: "campaign-archive.com", category: "NON_JOB_PROMO" }
+      # Support
+      - { value: "zendesk.com", category: "NON_JOB_SUPPORT" }
+      - { value: "intercom-mail.com", category: "NON_JOB_SUPPORT" }
+      - { value: "helpscout.net", category: "NON_JOB_SUPPORT" }
+      # Billing
+      - { value: "stripe.com", category: "NON_JOB_BILLING" }
+      - { value: "paypal.com", category: "NON_JOB_BILLING" }
+
+    # DENY: keywords (subject OR snippet OR headers). Category by group.
+    keywords:
+      AUTH_OTP:
+        category: "NON_JOB_AUTH"
+        phrases:
+          - "one-time password"
+          - "otp"
+          - "verification code"
+          - "security code"
+          - "verify your email"
+          - "email verification"
+          - "confirm your email"
+          - "new sign-in"
+          - "new login"
+          - "security alert"
+          - "suspicious activity"
+          - "password reset"
+          - "reset your password"
+          - "2fa"
+          - "two-step"
+      PROMO_NEWSLETTER:
+        category: "NON_JOB_PROMO"
+        phrases:
+          - "unsubscribe"
+          - "newsletter"
+          - "weekly update"
+          - "recommended"
+          - "jobs just dropped"
+          - "job matches"
+          - "discover new opportunities"
+          - "sale"
+          - "discount"
+          - "limited time"
+          - "promo"
+      DEPLOY_DEVOPS:
+        category: "NON_JOB_DEVOPS"
+        phrases:
+          - "deployment"
+          - "deploy"
+          - "build succeeded"
+          - "build failed"
+          - "your site is live"
+      BILLING:
+        category: "NON_JOB_BILLING"
+        phrases:
+          - "invoice"
+          - "receipt"
+          - "payment"
+          - "billing"
+          - "subscription"
+
+  # ALLOW: only if at least one strong job signal is present
+  allow:
+    ats_domains:
+      - "greenhouse.io"
+      - "lever.co"
+      - "workday.com"
+      - "myworkday.com"
+      - "icims.com"
+      - "smartrecruiters.com"
+      - "taleo.net"
+      - "successfactors.com"
+      - "ashbyhq.com"
+    strong_job_phrases:
+      - "application received"
+      - "thank you for applying"
+      - "application submitted"
+      - "we regret to inform you"
+      - "not moving forward"
+      - "position has been filled"
+      - "interview"
+      - "schedule interview"
+      - "availability"
+      - "invited to interview"
+      - "offer letter"
+      - "we are pleased to offer"
+
+  # Gmail categories that imply DENY unless strong job signal
+  gmail_deny_categories:
+    - "CATEGORY_PROMOTIONS"
+    - "CATEGORY_SOCIAL"
+
+  # Job-board alert: from_domain or subject phrases → NON_JOB_ALERT (default: filtered)
+  job_alert_domains:
+    - "indeed.com"
+    - "builtin.com"
+  job_alert_subject_phrases:
+    - "job matches"
+    - "jobs just dropped"
+    - "recommendations"

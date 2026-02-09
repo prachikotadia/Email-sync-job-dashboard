@@ -90,6 +90,9 @@ class Application(Base):
     company_name = Column(Text, nullable=False, index=True)  # Must never be null - canonical normalized name
     company_slug = Column(String, index=True)  # Lowercase, normalized slug for URL routing and deduplication
     company_domain = Column(Text, index=True)  # Company domain for normalization
+    company_source = Column(String, nullable=True)  # Resolution source: FROM_NAME, ROOT_DOMAIN, GREENHOUSE_URL, etc.
+    company_confidence = Column(String, nullable=True)  # Resolution confidence 0.0-1.0 (stored as string)
+    company_debug = Column(JSON, nullable=True)  # Debug trail for company resolution (list of strings)
     company_aliases = Column(JSON, nullable=True)  # Array of company aliases (e.g., ["Facebook", "Meta Platforms"] for "Meta")
     role = Column(String)  # role_title equivalent
     application_name = Column(Text)  # Derived from email subject + company + role for search
@@ -119,6 +122,13 @@ class Application(Base):
     model_name = Column(String, nullable=True)  # Model name (e.g., "job_email_classifier_v1")
     decision_path = Column(JSON, nullable=True)  # Decision path array: ["passed_ignore_filter", "hf_model:interview:0.91", "saved"]
     needs_review = Column(Boolean, default=False, nullable=False, index=True)  # Flag for manual review
+    
+    # Email Firewall fields (pre-classification filtering)
+    firewall_decision = Column(String, nullable=True, index=True)  # ALLOW or DENY
+    firewall_category = Column(String, nullable=True)  # NON_JOB_AUTH, NON_JOB_PROMO, NON_JOB_SUPPORT, NON_JOB_BILLING, NON_JOB_DEPLOY, UNKNOWN, JOB
+    firewall_reason = Column(Text, nullable=True)  # Human-readable reason for firewall decision
+    firewall_matched_rules = Column(JSON, nullable=True)  # List of matched rule IDs: ["domain_exact:render.com", "keyword:otp"]
+    is_job_email = Column(Boolean, nullable=True, index=True)  # Derived from firewall_decision (True if ALLOW, False if DENY)
     
     # Relationships
     user = relationship("User", back_populates="applications")
@@ -424,12 +434,31 @@ def init_db():
             if 'needs_review' not in existing_app_columns:
                 missing_columns.append(('needs_review', 'BOOLEAN'))
             
+            # Email Firewall fields
+            if 'firewall_decision' not in existing_app_columns:
+                missing_columns.append(('firewall_decision', 'VARCHAR'))
+            if 'firewall_category' not in existing_app_columns:
+                missing_columns.append(('firewall_category', 'VARCHAR'))
+            if 'firewall_reason' not in existing_app_columns:
+                missing_columns.append(('firewall_reason', 'TEXT'))
+            if 'firewall_matched_rules' not in existing_app_columns:
+                missing_columns.append(('firewall_matched_rules', 'JSON'))
+            if 'is_job_email' not in existing_app_columns:
+                missing_columns.append(('is_job_email', 'BOOLEAN'))
+            # Company resolution fields (deterministic resolver)
+            if 'company_source' not in existing_app_columns:
+                missing_columns.append(('company_source', 'VARCHAR'))
+            if 'company_confidence' not in existing_app_columns:
+                missing_columns.append(('company_confidence', 'VARCHAR'))
+            if 'company_debug' not in existing_app_columns:
+                missing_columns.append(('company_debug', 'JSON'))
+            
             if missing_columns:
                 try:
                     with engine.begin() as conn:
                         for col_name, col_type in missing_columns:
-                            if col_name == 'needs_review':
-                                # Special handling for needs_review with default
+                            if col_name == 'needs_review' or col_name == 'is_job_email':
+                                # Special handling for boolean columns with default
                                 conn.execute(text(f"ALTER TABLE applications ADD COLUMN IF NOT EXISTS {col_name} {col_type} DEFAULT false"))
                             else:
                                 conn.execute(text(f"ALTER TABLE applications ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))

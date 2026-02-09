@@ -20,9 +20,17 @@ _health_start = time.time()
 app = FastAPI(title="JobPulse API Gateway")
 
 # CORS configuration
+# Allow common Vite dev server ports and Docker frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:3000",  # Docker frontend
+        "http://localhost:5173",   # Vite default
+        "http://localhost:5174",   # Vite alternate
+        "http://localhost:5175",   # Vite alternate
+        "http://localhost:5176",   # Vite alternate
+        "http://localhost:5177",   # Vite alternate
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

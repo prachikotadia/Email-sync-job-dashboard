@@ -1,10 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from fastapi.responses import RedirectResponse, JSONResponse
+from pydantic import BaseModel
 import httpx
 import os
+import logging
+from typing import Optional
 from app.middleware.auth_middleware import verify_token
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+class CallbackBody(BaseModel):
+    code: str
+    state: Optional[str] = None
 
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://host.docker.internal:8001")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -57,47 +66,48 @@ async def oauth_callback_redirect(
     )
 
 @router.post("/callback")
-async def handle_callback(request: dict):
+async def handle_callback(body: CallbackBody):
     """
     Handle OAuth callback and return JWT token
     """
-    code = request.get("code")
-    if not code:
-        raise HTTPException(status_code=400, detail="Missing authorization code")
-    
+    code = body.code
     full_url = f"{AUTH_SERVICE_URL}/auth/callback"
-    print(f"API Gateway: Calling auth-service at {full_url}")
-    print(f"API Gateway: Code length: {len(code)}")
-    
+    payload = {"code": code}
+    if body.state is not None:
+        payload["state"] = body.state
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                full_url,
-                json={"code": code}
-            )
-            print(f"API Gateway: Auth service response status: {response.status_code}")
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(full_url, json=payload)
             if response.status_code != 200:
-                error_text = response.text
-                print(f"API Gateway: Auth service error response: {error_text}")
+                error_text = response.text or ""
+                logger.warning(f"Auth callback: auth-service returned {response.status_code}: {error_text[:500]}")
+                try:
+                    err_json = response.json()
+                    detail = err_json.get("detail")
+                    if isinstance(detail, dict):
+                        msg = detail.get("detail") or detail.get("error") or detail.get("message") or error_text[:300]
+                    else:
+                        msg = detail if isinstance(detail, str) else error_text[:300]
+                except Exception:
+                    msg = error_text[:300]
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Auth service error ({response.status_code}): {error_text[:200]}"
+                    detail=(msg or f"Auth service error ({response.status_code})").strip()
                 )
-            response.raise_for_status()
             return response.json()
-    except httpx.HTTPStatusError as e:
-        error_text = e.response.text if e.response else str(e)
-        print(f"API Gateway: HTTP error calling {full_url}: {e.response.status_code} - {error_text}")
-        raise HTTPException(
-            status_code=e.response.status_code if e.response else 503,
-            detail=f"Auth service error at {full_url}: {error_text[:200]}"
-        )
+    except HTTPException:
+        raise
     except httpx.RequestError as e:
-        print(f"API Gateway: Request error calling {full_url}: {str(e)}")
-        raise HTTPException(status_code=503, detail=f"Auth service unavailable at {full_url}: {str(e)}")
+        logger.warning(f"Auth callback: cannot reach auth-service at {full_url}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Auth service unavailable. Ensure Docker is running and run: docker compose up -d"
+        )
     except Exception as e:
-        print(f"API Gateway: Unexpected error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        msg = (str(e) or repr(e) or type(e).__name__ or "unknown").strip()
+        logger.exception(f"Auth callback: unexpected error: {msg}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {msg}")
 
 @router.get("/me")
 async def get_current_user(token_data: dict = Depends(verify_token)):

@@ -15,6 +15,7 @@ from app.search import search_applications, search_applications_fuzzy
 from app.advanced_search import advanced_search_applications
 from app.company_normalizer import normalize_company_name_for_grouping
 from app.ghosted_detector import GhostedDetector
+from app.enrich.company_resolver import resolve_company
 from app.export_service import generate_export
 from app.services.classifier.schemas import EmailForClassification, ClassificationResult
 from datetime import datetime, timedelta, timezone
@@ -1103,7 +1104,10 @@ async def get_applications(
         if not user:
             return {"applications": [], "total": 0, "counts": {}, "warning": None}
         
+        # Exclude firewall-filtered emails: they must never appear in job dashboard lists
         query = db.query(Application).filter(Application.user_id == user.id)
+        query = query.filter(Application.category.notin_(["FILTERED", "IGNORED"]))
+        query = query.filter((Application.is_job_email == True) | (Application.is_job_email.is_(None)))
         
         # Company filter (exact match - case-insensitive)
         if company:
@@ -1156,9 +1160,26 @@ async def get_applications(
             # Ensure gmail_thread_id is never null
             gmail_thread_id = app.gmail_thread_id if app.gmail_thread_id else app.gmail_message_id
             
+            # Display company: never show bare "Unknown"; use domain fallback when possible
+            cname = app.company_name or "Unknown Company"
+            cdomain = getattr(app, "company_domain", None) or ""
+            cname_lower = (cname or "").strip().lower()
+            is_unknown = cname_lower in ("", "unknown", "unknown company", "us", "greenhouse", "workday")
+            if is_unknown:
+                if cdomain and "greenhouse" in cdomain.lower():
+                    display_company = "Greenhouse (ATS)"
+                elif cdomain and "workday" in cdomain.lower():
+                    display_company = "Workday (ATS)"
+                else:
+                    display_company = f"{cdomain} (Unknown company)" if cdomain else "Unknown company"
+            else:
+                display_company = cname
+            
             apps_data.append({
                 "id": str(app.id),
-                "company_name": app.company_name or "Unknown Company",  # Ensure never null
+                "company_name": cname,
+                "company": display_company,  # UI display: company_name or "<domain> (Unknown company)"
+                "company_domain": cdomain,
                 "role_title": app.role,  # Role title (alias for 'role')
                 "status": category,  # Uppercase: APPLIED, REJECTED, INTERVIEW, OFFER_ACCEPTED, GHOSTED
                 "category": category,  # Add category field for frontend compatibility
@@ -1368,7 +1389,9 @@ async def get_applications_grouped_by_company(
             func.sum(case((func.lower(Application.category).in_(['offer_accepted', 'offer', 'accepted']), 1), else_=0)).label('count_offer'),
             func.sum(case((func.lower(Application.category) == 'ghosted', 1), else_=0)).label('count_ghosted'),
         ).filter(
-            Application.user_id == user.id
+            Application.user_id == user.id,
+            Application.category.notin_(["FILTERED", "IGNORED"]),
+            (Application.is_job_email == True) | (Application.is_job_email.is_(None)),
         ).group_by(
             Application.company_name
         ).order_by(
@@ -1429,10 +1452,12 @@ async def get_company_applications(
                 "next_cursor": None
             }
         
-        # Base query: filter by user and company (exact match, case-insensitive)
+        # Base query: filter by user and company; exclude firewall-filtered
         query = db.query(Application).filter(
             Application.user_id == user.id,
-            func.lower(Application.company_name) == company_name.lower().strip()
+            func.lower(Application.company_name) == company_name.lower().strip(),
+            Application.category.notin_(["FILTERED", "IGNORED"]),
+            (Application.is_job_email == True) | (Application.is_job_email.is_(None)),
         )
         
         # Search filter (within company)
@@ -1584,7 +1609,6 @@ async def get_application(
             "gmail_thread_id": application.gmail_thread_id,
             "gmail_deep_link": gmail_deep_link,  # Primary field (new)
             "gmail_web_url": gmail_web_url,  # Legacy field
-            "gmail_web_url": gmail_web_url,
             "role": application.role,
             "subject": application.subject,
             "from_email": application.from_email,
@@ -1595,6 +1619,82 @@ async def get_application(
     except Exception as e:
         logger.error(f"Error getting application: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get application: {str(e)}")
+
+def _get_debug_message_info(message_id: str, user_id: str, db: Session) -> dict:
+    """Shared logic: raw subject/snippet/from_domain + firewall decision + matched_rules."""
+    user = db.query(User).filter(User.email == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    application = db.query(Application).filter(
+        Application.gmail_message_id == message_id,
+        Application.user_id == user.id,
+    ).first()
+    if not application:
+        raise HTTPException(status_code=404, detail=f"Email with message_id {message_id} not found")
+    return {
+        "message_id": message_id,
+        "subject": application.subject,
+        "snippet": application.snippet,
+        "from_email": application.from_email,
+        "from_domain": getattr(application, "company_domain", None) or (application.from_email.split("@")[1] if application.from_email and "@" in application.from_email else None),
+        "received_at": application.received_at.isoformat() if application.received_at else None,
+        "firewall": {
+            "decision": getattr(application, "firewall_decision", None),
+            "category": getattr(application, "firewall_category", None),
+            "reason": getattr(application, "firewall_reason", None),
+            "matched_rules": getattr(application, "firewall_matched_rules", []),
+            "is_job_email": getattr(application, "is_job_email", None),
+        },
+        "classification": {
+            "category": application.category,
+            "classification_source": application.classification_source,
+            "rule_name": application.rule_name,
+            "llm_reason": application.llm_reason,
+            "confidence": application.classification_confidence,
+            "model_name": getattr(application, "model_name", None),
+            "raw_label": getattr(application, "raw_label", None),
+            "decision_path": getattr(application, "decision_path", None),
+            "needs_review": getattr(application, "needs_review", False),
+        },
+    }
+
+
+@app.get("/debug/message/{message_id}")
+async def debug_message(
+    message_id: str,
+    user_id: str = Query(..., description="User email"),
+    db: Session = Depends(get_db),
+):
+    """
+    Debug endpoint: raw subject, snippet, from_domain + firewall decision + exact matched rule IDs.
+    Use to verify which deny rule matched for filtered emails.
+    """
+    try:
+        return _get_debug_message_info(message_id, user_id, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting debug message: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/email/{message_id}")
+async def debug_email(
+    message_id: str,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Debug endpoint to inspect firewall decision and classification for an email.
+    Returns firewall decision, matched rules, and classification outputs.
+    """
+    try:
+        return _get_debug_message_info(message_id, user_id, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting debug info: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get debug info: {str(e)}")
 
 @app.get("/applications/stats")
 async def get_applications_stats(user_id: str = Query(...), db: Session = Depends(get_db)):
@@ -1683,6 +1783,73 @@ async def clear_user_data(request: ClearRequest, db: Session = Depends(get_db)):
         logger.error(f"Error clearing data: {e}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to clear data: {str(e)}")
+
+
+@app.post("/backfill/company")
+def backfill_company(
+    user_id: Optional[str] = Query(None, description="User email; if omitted, backfill all users"),
+    db: Session = Depends(get_db),
+):
+    """
+    Backfill company_name, company_source, company_confidence, company_debug for existing
+    applications where company is missing or Unknown/Unknown Company.
+    Uses subject, snippet, from_email (no stored headers/links).
+    """
+    try:
+        if user_id:
+            user = db.query(User).filter(User.email == user_id).first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            user_ids = [user.id]
+        else:
+            user_ids = [u.id for u in db.query(User).all()]
+        
+        updated = 0
+        for uid in user_ids:
+            q = db.query(Application).filter(
+                Application.user_id == uid,
+                or_(
+                    Application.company_name.is_(None),
+                    Application.company_name == "",
+                    func.lower(func.coalesce(Application.company_name, "")) == "unknown",
+                    func.lower(func.coalesce(Application.company_name, "")) == "unknown company",
+                    func.lower(func.coalesce(Application.company_name, "")) == "us",
+                    func.lower(func.coalesce(Application.company_name, "")) == "greenhouse",
+                    func.lower(func.coalesce(Application.company_name, "")) == "workday",
+                ),
+            )
+            for app in q.all():
+                from_email = app.from_email or ""
+                from_domain = (app.company_domain or "").strip().lower()
+                if not from_domain and "@" in from_email:
+                    from_domain = from_email.split("@")[1].lower()
+                resolved = resolve_company(
+                    subject=app.subject or "",
+                    snippet=app.snippet or "",
+                    from_name="",
+                    from_email=from_email,
+                    from_domain=from_domain,
+                    body_text=None,
+                    urls=None,
+                )
+                cname = (resolved.get("company_name") or "Unknown Company").strip() or "Unknown Company"
+                app.company_name = cname
+                if hasattr(app, "company_source"):
+                    app.company_source = resolved.get("company_source")
+                if hasattr(app, "company_confidence"):
+                    app.company_confidence = str(resolved.get("company_confidence")) if resolved.get("company_confidence") is not None else None
+                if hasattr(app, "company_debug"):
+                    app.company_debug = resolved.get("company_debug")
+                updated += 1
+        db.commit()
+        return {"message": "Company backfill completed", "updated": updated}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during company backfill: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Backfill failed: {str(e)}")
+
 
 @app.post("/oauth/store")
 async def store_oauth_tokens(request: OAuthTokenStoreRequest, db: Session = Depends(get_db)):

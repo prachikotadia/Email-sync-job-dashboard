@@ -28,12 +28,17 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response) {
-      // 4xx or 5xx errors
-      const message = error.response.data?.detail || error.response.data?.message || 'An error occurred'
+      // 4xx or 5xx errors - support detail as string or object
+      let message = error.response.data?.detail ?? error.response.data?.message
+      if (message != null && typeof message === 'object') {
+        message = message.detail ?? message.error ?? message.message ?? JSON.stringify(message).slice(0, 200)
+      }
+      message = (message && String(message).trim()) || 'An error occurred'
       console.error('API Error:', {
         status: error.response.status,
         message,
         url: error.config?.url,
+        data: error.response.data,
       })
       
       // 401 Unauthorized - clear token and redirect

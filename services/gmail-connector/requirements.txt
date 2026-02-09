@@ -31,3 +31,6 @@ apscheduler>=3.10.0
 # RejectGate: Fast rejection detection (TF-IDF + Logistic Regression)
 scikit-learn>=1.3.0
 joblib>=1.3.0
+
+# Email Firewall: YAML config parsing
+pyyaml>=6.0.1

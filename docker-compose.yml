@@ -21,8 +21,6 @@
 # See SERVICE_LAYOUT.md for service boundaries and allowed calls.
 # ============================================================================
 
-version: '3.8'
-
 services:
   # --------------------------------------------------------------------------
   # Frontend: React SPA served by nginx
@@ -136,6 +134,8 @@ services:
     volumes:
       # Mount models directory for RejectGate and ONNX models
       - ./models:/app/models:ro
+      # Mount config directory for Email Firewall configuration
+      - ./config:/app/config:ro
     depends_on:
       db:
         condition: service_healthy
@@ -235,6 +235,8 @@ services:
     volumes:
       # Mount models directory for RejectGate and ONNX models
       - ./models:/app/models:ro
+      # Mount config directory for Email Firewall configuration
+      - ./config:/app/config:ro
     depends_on:
       db:
         condition: service_healthy

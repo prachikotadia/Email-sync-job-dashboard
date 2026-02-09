@@ -268,21 +268,21 @@ async def callback(request: CallbackRequest):
         raise
     except Exception as e:
         error_type = type(e).__name__
-        error_message = str(e)
-        
-        # Log full error details (but never log secrets)
+        error_message = (str(e) or repr(e) or "unknown").strip()
+        # Sanitize: don't expose tokens or secrets (keep common OAuth error keywords)
+        safe_message = error_message[:500] if error_message else "An unexpected error occurred during authentication"
+
         logger.error(
             f"Unexpected error in OAuth callback [request_id={request_id}]: "
             f"type={error_type}, message={error_message}",
             exc_info=True
         )
-        
-        # Return structured error response without exposing internals
+
         raise HTTPException(
             status_code=500,
             detail={
                 "error": "OAuth callback failed",
-                "detail": "An unexpected error occurred during authentication",
+                "detail": safe_message,
                 "request_id": request_id
             }
         )

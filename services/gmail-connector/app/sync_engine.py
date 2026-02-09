@@ -5,6 +5,7 @@ from app.classifier import Classifier
 from app.hybrid_classifier import HybridClassifier
 from app.company_extractor import CompanyExtractor
 from app.database import Application, User
+from app.enrich.company_resolver import resolve_company, extract_links_from_text
 from datetime import datetime, timezone
 import logging
 import os
@@ -90,6 +91,8 @@ class SyncEngine:
         total_scanned = 0
         total_fetched = 0
         candidate_job_emails = 0
+        firewall_denied_total = 0
+        firewall_allowed_total = 0
         classified = {
             "APPLIED": 0,
             "REJECTED": 0,
@@ -268,7 +271,102 @@ class SyncEngine:
                         skipped += 1
                         continue
                     
-                    # REJECTGATE: Fast rejection detection (STRICT PRIORITY - runs first)
+                    # JOB EMAIL FIREWALL: Deny-first, allow-only (STRICT - runs FIRST, before any classifier)
+                    # Blocks non-job: Render, Netlify, Google auth, OTP, Indeed/BuiltIn alerts, promos; deterministic + explainable
+                    firewall_result = None
+                    try:
+                        from app.classifiers.job_firewall import firewall_for_sync
+                        label_ids = message.get("labelIds") or []
+                        firewall_result = firewall_for_sync(
+                            subject=application_data.get("subject", ""),
+                            snippet=application_data.get("snippet", ""),
+                            from_email=application_data.get("from_email", ""),
+                            from_domain=application_data.get("sender_domain", ""),
+                            headers=application_data.get("headers"),
+                            label_ids=label_ids,
+                        )
+                        if not firewall_result.get("allow_job_pipeline", False):
+                            firewall_denied_total += 1
+                            skipped += 1
+                            thread_id = message.get("threadId") or message_id
+                            firewall_category = firewall_result.get("category", "UNKNOWN")
+                            matched_rules = firewall_result.get("matched_rules", [])
+                            try:
+                                from app.database import Application
+                                existing = self.db.query(Application).filter(
+                                    Application.gmail_message_id == message_id,
+                                    Application.user_id == user_id,
+                                ).first()
+                                if not existing:
+                                    gmail_web_url = self._generate_gmail_web_url(message_id)
+                                    filtered_app = Application(
+                                        user_id=user_id,
+                                        gmail_message_id=message_id,
+                                        gmail_thread_id=thread_id,
+                                        gmail_web_url=gmail_web_url,
+                                        company_name=application_data.get("company_name", "Unknown Company"),
+                                        subject=application_data.get("subject", "No Subject"),
+                                        snippet=application_data.get("snippet", ""),
+                                        from_email=application_data.get("from_email", ""),
+                                        received_at=application_data.get("received_at", datetime.now(timezone.utc)),
+                                        category="FILTERED",
+                                        firewall_decision="DENY",
+                                        firewall_category=firewall_category,
+                                        firewall_reason=firewall_result.get("reason", ""),
+                                        firewall_matched_rules=matched_rules,
+                                        is_job_email=False,
+                                    )
+                                    self.db.add(filtered_app)
+                                else:
+                                    existing.firewall_decision = "DENY"
+                                    existing.firewall_category = firewall_category
+                                    existing.firewall_reason = firewall_result.get("reason", "")
+                                    existing.firewall_matched_rules = matched_rules
+                                    existing.is_job_email = False
+                                    existing.category = "FILTERED"
+                                if firewall_denied_total % 20 == 0:
+                                    self.db.commit()
+                            except Exception as save_error:
+                                logger.debug(f"Failed to save firewall decision for message {message_id}: {save_error}")
+                            phase = getattr(self, "_sync_phase_enum", None)
+                            if phase and hasattr(phase, "FILTERED_NON_JOB"):
+                                yield {
+                                    "phase": phase.FILTERED_NON_JOB.value if hasattr(phase.FILTERED_NON_JOB, "value") else "filtered_non_job",
+                                    "total_scanned": total_scanned,
+                                    "total_fetched": total_fetched,
+                                    "candidate_job_emails": candidate_job_emails,
+                                    "processed_emails": sum(classified.values()),
+                                    "classified": classified.copy(),
+                                    "skipped": skipped,
+                                    "firewall_denied": firewall_denied_total,
+                                    "firewall_allowed": firewall_allowed_total,
+                                    "email_id": message_id,
+                                    "log_message": f"Filtered non-job email: {firewall_result.get('reason', '')}",
+                                    "log_type": "warning",
+                                    "firewall_matched_rules": [r.get("id") for r in matched_rules] if matched_rules else [],
+                                }
+                            else:
+                                yield {
+                                    "total_scanned": total_scanned,
+                                    "total_fetched": total_fetched,
+                                    "candidate_job_emails": candidate_job_emails,
+                                    "processed_emails": sum(classified.values()),
+                                    "classified": classified.copy(),
+                                    "skipped": skipped,
+                                    "firewall_denied": firewall_denied_total,
+                                    "firewall_allowed": firewall_allowed_total,
+                                    "email_id": message_id,
+                                    "log_message": f"Filtered non-job email: {firewall_result.get('reason', '')}",
+                                    "log_type": "warning",
+                                }
+                            continue
+                        firewall_allowed_total += 1
+                        application_data["_firewall_result"] = firewall_result
+                    except Exception as e:
+                        logger.warning(f"Job firewall check failed for message {message_id}: {e}. Continuing with classification.")
+                        firewall_allowed_total += 1
+                    
+                    # REJECTGATE: Fast rejection detection (runs after firewall)
                     # If RejectGate says rejected, set status=REJECTED and skip full classification pipeline
                     decision_path = []
                     reject_gate_result = None
@@ -314,7 +412,8 @@ class SyncEngine:
                                         category,
                                         thread_id,
                                         classification_result,
-                                        classification_trace
+                                        classification_trace,
+                                        firewall_result=application_data.get("_firewall_result")
                                     )
                                     # Fast path: commit immediately for RejectGate (critical for speed)
                                     self.db.commit()
@@ -632,7 +731,8 @@ class SyncEngine:
                             category,
                             thread_id,
                             classification_result,  # Works for both ONNX and HybridClassifier
-                            classification_trace
+                            classification_trace,
+                            firewall_result=application_data.get("_firewall_result")
                         )
                         save_succeeded = True
                         
@@ -713,6 +813,7 @@ class SyncEngine:
             
             logger.info(
                 f"Fetched: {total_fetched} emails. Job-related candidates: {candidate_job_emails}. "
+                f"Firewall: {firewall_allowed_total} allowed, {firewall_denied_total} denied. "
                 f"APPLIED: {classified['APPLIED']}, REJECTED: {classified['REJECTED']}, "
                 f"INTERVIEW: {classified['INTERVIEW']}, OFFER_ACCEPTED: {classified['OFFER_ACCEPTED']}, "
                 f"GHOSTED: {classified['GHOSTED']}. Skipped: {skipped}."
@@ -771,64 +872,94 @@ class SyncEngine:
     
     def _extract_application(self, message: Dict) -> Dict:
         """
-        Extract application data from Gmail message
+        Extract application data from Gmail message.
+        Company resolution: deterministic resolver (headers, URLs, from_name, domain, subject).
         """
         payload = message.get('payload', {})
-        headers = payload.get('headers', [])
+        headers_list = payload.get('headers', [])
         
-        # Extract headers
         subject = ""
+        from_raw = ""  # Full From header value (name + email)
         from_email = ""
         date_str = ""
         
-        for header in headers:
+        for header in headers_list:
             name = header.get('name', '').lower()
             value = header.get('value', '')
-            
             if name == 'subject':
                 subject = value
             elif name == 'from':
+                from_raw = value
                 from_email = value
             elif name == 'date':
                 date_str = value
+        
+        # Parse From: "Display Name <email@domain.com>" -> from_name, from_email
+        from_name = ""
+        if from_raw and "<" in from_raw and ">" in from_raw:
+            from_name = from_raw.split("<")[0].strip().strip('"').strip("'")
+            from_email = from_raw.split("<")[1].split(">")[0].strip()
+        elif from_raw:
+            from_email = from_raw.strip()
+        
+        # Store raw headers needed for company extraction (From, Reply-To, Return-Path, List-ID)
+        headers_dict = self._extract_headers(message)
+        company_headers = {}
+        for key in ("From", "Reply-To", "Return-Path", "List-ID"):
+            for k, v in headers_dict.items():
+                if k.lower() == key.lower():
+                    company_headers[k] = v
+                    break
         
         # Parse date (with timezone)
         try:
             from email.utils import parsedate_to_datetime
             received_at = parsedate_to_datetime(date_str) if date_str else datetime.now(timezone.utc)
-            # Ensure timezone-aware
             if received_at.tzinfo is None:
                 received_at = received_at.replace(tzinfo=timezone.utc)
-        except:
+        except Exception:
             received_at = datetime.now(timezone.utc)
         
-        # Extract company and role using company extractor (pass full message for HTML parsing)
-        company, source, confidence = self.company_extractor.extract(
-            message, subject, from_email, message.get('snippet', '')
-        )
-        role = self.company_extractor.extract_role(subject, message.get('snippet', ''))
-        
-        # Company is guaranteed to never be None (extractor always returns a value)
-        if not company:
-            company = 'Unknown Company'  # Safety fallback (should never happen)
-        
-        # Extract email body (for Layer 4: Structural Parsing)
+        snippet = message.get('snippet', '')
         body = self._extract_email_body(message)
+        # Extract URLs from body + snippet (first 5 for resolver)
+        links = extract_links_from_text((body or "") + " " + (snippet or ""))
+        urls_first5 = (links or [])[:5]
         
-        # Extract sender domain
         sender_domain = ""
-        if '@' in from_email:
-            sender_domain = from_email.split('@')[1].lower()
+        if "@" in from_email:
+            sender_domain = from_email.split("@")[1].lower()
+        
+        # ATS-aware company resolution: body_text + urls; never Us/Greenhouse/Unknown when subject/signature/link exist
+        resolved = resolve_company(
+            subject=subject,
+            snippet=snippet,
+            from_name=from_name,
+            from_email=from_email,
+            from_domain=sender_domain,
+            body_text=body,
+            urls=urls_first5,
+            headers=company_headers if company_headers else None,
+            links=urls_first5,
+        )
+        company = (resolved.get("company_name") or "Unknown Company").strip()
+        if not company:
+            company = "Unknown Company"
+        
+        role = self.company_extractor.extract_role(subject, snippet)
         
         return {
             "company_name": company,
+            "company_source": resolved.get("company_source"),
+            "company_confidence": resolved.get("company_confidence"),
+            "company_debug": resolved.get("company_debug") or resolved.get("debug"),
             "role": role,
             "subject": subject,
             "from_email": from_email,
             "sender_domain": sender_domain,
             "received_at": received_at,
-            "snippet": message.get('snippet', ''),
-            "body": body,  # Full body for structural parsing
+            "snippet": snippet,
+            "body": body,
         }
     
     def _extract_email_body(self, message: Dict) -> str:
@@ -1038,7 +1169,8 @@ class SyncEngine:
         category: str,
         thread_id: str = None,
         classification_result = None,  # ClassificationResult object with traceability
-        classification_trace: Dict = None  # Enhanced traceability dict
+        classification_trace: Dict = None,  # Enhanced traceability dict
+        firewall_result: Dict = None  # Firewall decision result
     ):
         """
         Save application to database (upsert)
@@ -1055,7 +1187,7 @@ class SyncEngine:
         elif category_upper == "OFFER":
             category_upper = "OFFER"  # Use OFFER (new system)
         
-        valid_categories = ["ACTIVE", "APPLIED", "REJECTED", "INTERVIEW", "OFFER", "OFFER_ACCEPTED", "GHOSTED", "WITHDRAWN"]
+        valid_categories = ["ACTIVE", "APPLIED", "REJECTED", "INTERVIEW", "OFFER", "OFFER_ACCEPTED", "GHOSTED", "WITHDRAWN", "IGNORED"]
         if not category_upper or category_upper not in valid_categories:
             logger.warning(f"Invalid category: {category}, cannot save")
             # CRITICAL: Raise exception so caller knows save failed (for verification)
@@ -1112,20 +1244,22 @@ class SyncEngine:
             if needs_review and isinstance(signals_used, list) and "needs_review" not in signals_used:
                 signals_used = signals_used + ["needs_review"]
         
-        # Ensure company_name is never null - use fallback
-        company_name = application_data.get("company_name")
-        if not company_name or company_name.strip() == '':
-            # Fallback extraction from email domain
-            from_email = application_data.get("from_email", "")
-            if '@' in from_email:
-                domain = from_email.split('@')[1].lower()
-                # Remove common email providers
-                if domain not in ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com', 'aol.com']:
-                    company_name = domain.split('.')[0].capitalize()
+        # Ensure company_name is never null; replace "Unknown Company" when we can derive from sender domain
+        company_name = (application_data.get("company_name") or "").strip()
+        from_email_val = application_data.get("from_email", "")
+        if not company_name or company_name.lower() == "unknown company":
+            if from_email_val and "@" in from_email_val:
+                domain = from_email_val.split("@")[1].lower()
+                ignore = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com", "aol.com", "mail.com"}
+                if domain not in ignore:
+                    parts = domain.split(".")
+                    generic = {"mail", "email", "www", "web", "noreply", "hr", "careers", "jobs"}
+                    name_part = next((p for p in parts if p not in generic and len(p) > 1), parts[0] if parts else None)
+                    company_name = name_part.capitalize() if name_part else "Unknown Company"
                 else:
-                    company_name = 'Unknown Company'
+                    company_name = "Unknown Company"
             else:
-                company_name = 'Unknown Company'
+                company_name = company_name or "Unknown Company"
         
         # Extract company domain
         from_email = application_data.get("from_email", "")
@@ -1159,6 +1293,30 @@ class SyncEngine:
         # Set last_activity_at (initially same as received_at, updates on status change)
         received_at_value = application_data.get("received_at") or datetime.now(timezone.utc)
         last_activity_at_value = received_at_value
+        
+        # Extract firewall result from application_data if available
+        if firewall_result is None:
+            firewall_result = application_data.get("_firewall_result")
+        
+        # Company resolution fields (deterministic resolver)
+        company_source = application_data.get("company_source")
+        company_confidence_raw = application_data.get("company_confidence")
+        company_confidence = str(company_confidence_raw) if company_confidence_raw is not None else None
+        company_debug = application_data.get("company_debug")  # list of strings, stored as JSON
+        
+        # Store firewall information
+        firewall_decision = None
+        firewall_category = None
+        firewall_reason = None
+        firewall_matched_rules = None
+        is_job_email = None
+        
+        if firewall_result:
+            firewall_decision = firewall_result.get("decision")
+            firewall_category = firewall_result.get("category")
+            firewall_reason = firewall_result.get("reason")
+            firewall_matched_rules = firewall_result.get("matched_rules", [])
+            is_job_email = firewall_result.get("allow_job_pipeline", False)
         
         # IDEMPOTENCY: Check if application already exists (upsert to prevent duplicates)
         # This is a defensive check - messages should already be filtered before classification
@@ -1224,6 +1382,25 @@ class SyncEngine:
                     existing.last_activity_at = datetime.now(timezone.utc)
                 elif not existing.last_activity_at:
                     existing.last_activity_at = last_activity_at_value
+            
+            # Update firewall fields if they exist
+            if hasattr(existing, 'firewall_decision') and firewall_decision:
+                existing.firewall_decision = firewall_decision
+            if hasattr(existing, 'firewall_category') and firewall_category:
+                existing.firewall_category = firewall_category
+            if hasattr(existing, 'firewall_reason') and firewall_reason:
+                existing.firewall_reason = firewall_reason
+            if hasattr(existing, 'firewall_matched_rules') and firewall_matched_rules:
+                existing.firewall_matched_rules = firewall_matched_rules
+            if hasattr(existing, 'is_job_email') and is_job_email is not None:
+                existing.is_job_email = is_job_email
+            # Company resolution fields
+            if hasattr(existing, 'company_source'):
+                existing.company_source = company_source
+            if hasattr(existing, 'company_confidence'):
+                existing.company_confidence = company_confidence
+            if hasattr(existing, 'company_debug'):
+                existing.company_debug = company_debug
             
             # Create audit log entry if category changed
             if category_changed and classification_result:
@@ -1298,6 +1475,25 @@ class SyncEngine:
                 app_data['needs_review'] = needs_review
             if hasattr(Application, 'classification_version'):
                 app_data['classification_version'] = classification_version
+            
+            # Add firewall fields if they exist
+            if hasattr(Application, 'firewall_decision') and firewall_decision:
+                app_data['firewall_decision'] = firewall_decision
+            if hasattr(Application, 'firewall_category') and firewall_category:
+                app_data['firewall_category'] = firewall_category
+            if hasattr(Application, 'firewall_reason') and firewall_reason:
+                app_data['firewall_reason'] = firewall_reason
+            if hasattr(Application, 'firewall_matched_rules') and firewall_matched_rules:
+                app_data['firewall_matched_rules'] = firewall_matched_rules
+            # Company resolution fields
+            if hasattr(Application, 'company_source'):
+                app_data['company_source'] = company_source
+            if hasattr(Application, 'company_confidence'):
+                app_data['company_confidence'] = company_confidence
+            if hasattr(Application, 'company_debug'):
+                app_data['company_debug'] = company_debug
+            if hasattr(Application, 'is_job_email') and is_job_email is not None:
+                app_data['is_job_email'] = is_job_email
             
             application = Application(**app_data)
             self.db.add(application)
